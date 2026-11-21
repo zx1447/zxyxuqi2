@@ -23,7 +23,7 @@ on:
       minutes:
         description: 'AFK 挂机分钟数（默认 340 = 6 小时上限内留余量）'
         required: false
-        default: '340'
+        default: '10'
 
 permissions:
   contents: read
@@ -111,7 +111,7 @@ jobs:
           MCWH_EMAIL: ${{ secrets.MCWH_EMAIL }}
           MCWH_PASSWORD: ${{ secrets.MCWH_PASSWORD }}
           MCWH_PROXY: ${{ env.WARP_OK == '1' && 'socks5://127.0.0.1:40000' || '' }}
-          MCWH_AFK_MAX_MINUTES: ${{ github.event.inputs.minutes || '340' }}
+          MCWH_AFK_MAX_MINUTES: ${{ github.event.inputs.minutes || '10' }}
           MCWH_BUY_7D_AT: '500'
         run: python .github/scripts/mcworldhost_daily.py
 
