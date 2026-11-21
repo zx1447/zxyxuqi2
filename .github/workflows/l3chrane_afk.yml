@@ -31,7 +31,7 @@ permissions:
 jobs:
   work:
     runs-on: ubuntu-latest
-    timeout-minutes: 375
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,7 +48,7 @@ jobs:
           WORK_MIN: ${{ github.event.inputs.work_min || '355' }}
         run: |
           echo "🔥 work 段 $WORK_MIN 分钟"
-          python3 l3chrane_afk.py --loop "$WORK_MIN"
+          python3 l3chrane_afk.py 
 
       - name: 回写会话/状态
         if: always()
@@ -74,7 +74,7 @@ jobs:
   cool:
     needs: work
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,12 +91,3 @@ jobs:
           python3 l3chrane_afk.py --cool "$COOL_MIN"
 
       # 只有正常跑完才接力；手动取消不派发，避免「取消→接力→再取消」的连锁
-      - name: 自派发接力（下一轮：挂满 → 休息 → 挂满）
-        if: always() && !cancelled()
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then echo "GH_PAT 未配置，跳过接力"; exit 0; fi
-          gh workflow run l3chrane_afk.yml -R "$GITHUB_REPOSITORY" \
-            -f work_min=355 -f cool_min=44 \
-            && echo "✅ 已派发下一轮" || echo "⚠️ 接力失败（schedule 兜底）"

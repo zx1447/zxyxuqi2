@@ -6,7 +6,7 @@ name: Revenact Claim (每 30 分钟查签到)
 # 挂机由 revenact.yml 负责（360 分钟一轮）。
 on:
   schedule:
-    - cron: '5,35 * * * *'      # 每 30 分钟
+    - cron: '31 */6 * * *'      # 每 30 分钟
   workflow_dispatch:
 
 permissions:

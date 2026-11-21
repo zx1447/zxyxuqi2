@@ -5,7 +5,7 @@ name: MCWorldHost Auto Renew (7d)
 # 任何购买失败都显式报错（不会再像 2026-11-16 那样静默吞掉导致过期）。
 on:
   schedule:
-    - cron: '17 */2 * * *'
+    - cron: '41 */6 * * *'
   workflow_dispatch:
     inputs:
       min_hours:

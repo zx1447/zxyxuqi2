@@ -17,7 +17,7 @@ on:
     # 站点日上限 500 币：吃满即停（脚本读服务端 dayLimitReached 判定），
     # 拿不到积分也会在约 8 分钟内退出 —— 不会白占满 6 小时机时。
     # 单次上限 340 分钟只是「兜底天花板」，正常远用不到。
-    - cron: '0 2,14 * * *'
+    - cron: '13 */6 * * *'
   workflow_dispatch:
     inputs:
       minutes:
@@ -35,7 +35,7 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 15
     steps:
       - name: Checkout mcworldhost branch (shared business branch)
         uses: actions/checkout@v4

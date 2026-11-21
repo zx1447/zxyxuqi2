@@ -6,7 +6,7 @@ name: Octagon Renew
 #  · 账密登录要 Turnstile，Discord OAuth 是唯一省事活路
 on:
   schedule:
-    - cron: '0 5,17 * * *'
+    - cron: '13 */6 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -40,7 +40,6 @@ jobs:
       - name: 把滑动续期后的 cookie 写回 secret
         if: always() && steps.renew.outputs.cookie != ''
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
           NEW_COOKIE: ${{ steps.renew.outputs.cookie }}
         run: |
           printf '%s' "$NEW_COOKIE" | gh secret set OCTAGON_COOKIE --repo "$GITHUB_REPOSITORY"

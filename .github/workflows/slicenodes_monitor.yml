@@ -27,7 +27,7 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     # Workflow 不会检查一次后结束；它会保持运行约 350 分钟。
-    timeout-minutes: 360
+    timeout-minutes: 15
     steps:
       - name: Checkout clean SliceNodes branch
         uses: actions/checkout@v4

@@ -23,7 +23,7 @@ name: Nodaroo AFK
 on:
   schedule:
     # 兜底：每 6 小时探一次，若接力链断了能自己接回来（从挂机棒起）
-    - cron: '23 */6 * * *'
+    - cron: '31 */6 * * *'
   workflow_dispatch:
     inputs:
       phase:
@@ -53,7 +53,7 @@ concurrency:
 jobs:
   afk:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 15
     steps:
       - name: Checkout nodarooAFK branch
         uses: actions/checkout@v4
@@ -102,33 +102,3 @@ jobs:
             done
           fi
 
-      - name: 接力（挂机棒 -> 冷却棒 -> 挂机棒 ...）
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-          PHASE: ${{ github.event.inputs.phase || inputs.phase || '1' }}
-          FARM: ${{ github.event.inputs.farm_minutes || inputs.farm_minutes || '355' }}
-          COOLDOWN: ${{ github.event.inputs.cooldown_minutes || inputs.cooldown_minutes || '30' }}
-          RELAY: ${{ github.event.inputs.relay || inputs.relay || '1' }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "⚠️ GH_PAT 未配置，跳过接力（schedule 兜底）"
-            exit 0
-          fi
-          if [ "$RELAY" != "1" ]; then
-            echo "单发模式（relay=0），不派发下一棒"
-            exit 0
-          fi
-          # 下一棒挂机时长：355 = 360 上限 - 环境/派发余量（见文件头注释）
-          NEXT_FARM=355
-          if [ "$PHASE" = "1" ]; then
-            echo "挂机棒结束 -> 派发冷却棒（${COOLDOWN} 分钟）..."
-            gh workflow run nodaroo_afk.yml -R "$GITHUB_REPOSITORY" --ref main \
-              -f phase=2 -f farm_minutes=0 -f cooldown_minutes="$COOLDOWN" -f relay=1 \
-              && echo "✅ 冷却棒已派发" || echo "⚠️ 交接失败（schedule 兜底）"
-          else
-            echo "冷却棒结束 -> 派发下一个挂机棒（${NEXT_FARM} 分钟）..."
-            gh workflow run nodaroo_afk.yml -R "$GITHUB_REPOSITORY" --ref main \
-              -f phase=1 -f farm_minutes="$NEXT_FARM" -f cooldown_minutes="$COOLDOWN" -f relay=1 \
-              && echo "✅ 下一会话已派发" || echo "⚠️ 接力失败（schedule 兜底）"
-          fi
