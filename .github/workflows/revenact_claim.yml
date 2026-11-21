@@ -1,0 +1,58 @@
+name: Revenact Claim (每 30 分钟查签到)
+
+# 只做一件事：检查签到是否到 14 小时冷却，到了就领，没到就静默退出。
+# 几十秒结束，不挂机。目的是保证 14 小时一到 30 分钟内必被领到。
+#
+# 挂机由 revenact.yml 负责（360 分钟一轮）。
+on:
+  schedule:
+    - cron: '5,35 * * * *'      # 每 30 分钟
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: revenact-claim
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: rev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 到点就签到
+        env:
+          REVENACT_TOKEN: ${{ secrets.REVENACT_TOKEN }}
+          REVENACT_EMAIL: ${{ secrets.REVENACT_EMAIL }}
+          REVENACT_PASSWORD: ${{ secrets.REVENACT_PASSWORD }}
+          REVENACT_TOTP_SECRET: ${{ secrets.REVENACT_TOTP_SECRET }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python rev/.github/scripts/revenact.py --claim-only
+
+      - name: 回写状态（token 可能被刷新）
+        if: always()
+        run: |
+          cd rev
+          F=.github/scripts/revenact_state.json
+          if [ -f "$F" ] && ! git diff --quiet "$F"; then
+            git config user.name 'zx-build'
+            git config user.email 'build@zx.local'
+            git add "$F"
+            git commit -m "state: revenact claim [skip ci]" || true
+            for i in 1 2 3; do
+              git fetch -q origin revenact || true
+              git -c user.name='zx-build' -c user.email='build@zx.local' rebase -X theirs origin/revenact >/dev/null 2>&1 \
+                || git rebase --abort >/dev/null 2>&1 || true
+              git push origin HEAD:revenact && break || sleep $((i*3))
+            done
+          fi

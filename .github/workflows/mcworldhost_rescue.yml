@@ -1,0 +1,120 @@
+name: MCWorldHost Rescue
+
+# 救活 / 续期专用：动态挖 server action id → 买运行时间
+#  · 站点重建后 action id 会变，硬编码会 404；本 workflow 每次运行都重新发现
+#  · 手动触发；默认 dry-run 只看不买
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'buy=直接买 runtime；probe=探测；true=只读；false=自动发现后买'
+        required: false
+        default: 'false'
+      buy:
+        description: '强制买哪个（留空自动：够 7 天买 7 天，否则 24h）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mcwh-rescue
+  cancel-in-progress: false
+
+jobs:
+  rescue:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout mcworldhost branch (scripts live there)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: mcwh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --quiet playwright==1.58.0
+          python -m playwright install --with-deps chromium
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+
+      - name: Start Cloudflare WARP SOCKS5 proxy
+        run: |
+          set -e
+          mkdir -p /tmp/warp && cd /tmp/warp
+          curl -fsSL -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.32/wgcf_2.2.32_linux_amd64
+          chmod +x wgcf
+          curl -fsSL -o wireproxy.tar.gz https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz
+          tar -xzf wireproxy.tar.gz && chmod +x wireproxy
+          WARP_PROFILE="${{ secrets.MCWH_WARP_PROFILE }}"
+          if [ -n "$WARP_PROFILE" ]; then
+            printf '%s\n[Socks5]\nBindAddress = 127.0.0.1:40000\n' "$WARP_PROFILE" > wgcf-profile.conf
+          else
+            ./wgcf register --accept-tos && ./wgcf generate
+            printf '\n[Socks5]\nBindAddress = 127.0.0.1:40000\n' >> wgcf-profile.conf
+          fi
+          nohup ./wireproxy -c wgcf-profile.conf > /tmp/warp/wireproxy.log 2>&1 &
+          ok=0
+          for i in $(seq 1 25); do
+            if curl -fsS --max-time 6 -x socks5h://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace > /tmp/warp/trace; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" = "1" ]; then echo "WARP_OK=1" >> $GITHUB_ENV; grep -E '^(ip|loc|warp)=' /tmp/warp/trace; else echo "WARP_OK=0" >> $GITHUB_ENV; fi
+
+      - name: Rescue / Probe
+        env:
+          MCWH_EMAIL: ${{ secrets.MCWH_EMAIL }}
+          MCWH_PASSWORD: ${{ secrets.MCWH_PASSWORD }}
+          MCWH_PROXY: ${{ env.WARP_OK == '1' && 'socks5://127.0.0.1:40000' || '' }}
+          MCWH_BUY: ${{ github.event.inputs.buy }}
+          MCWH_ITEM: ${{ github.event.inputs.buy }}
+          MODE: ${{ github.event.inputs.dry_run }}
+        run: |
+          cd mcwh
+          if [ "$MODE" = "status" ]; then
+            python .github/scripts/mcworldhost_status.py
+          elif [ "$MODE" = "dump" ]; then
+            python .github/scripts/mcworldhost_dump.py
+          elif [ "$MODE" = "buy" ]; then
+            python .github/scripts/mcworldhost_buy.py
+          elif [ "$MODE" = "probe" ]; then
+            python .github/scripts/mcworldhost_probe.py
+          elif [ "$MODE" = "true" ]; then
+            python .github/scripts/mcworldhost_rescue.py --dry-run
+          else
+            python .github/scripts/mcworldhost_rescue.py
+          fi
+
+      - name: 回写挖到的 action id
+        if: always()
+        run: |
+          cd mcwh
+          git config user.name 'zx-build'
+          git config user.email 'build@zx.local'
+          if [ -f mcwh_actions.json ]; then
+            git add mcwh_actions.json
+            git diff --cached --quiet || git commit -m "state: mcwh action ids [skip ci]"
+            for i in 1 2 3; do
+              git fetch -q origin mcworldhost || true
+              git -c user.name='zx-build' -c user.email='build@zx.local' rebase -X theirs origin/mcworldhost >/dev/null 2>&1 || git rebase --abort >/dev/null 2>&1 || true
+              git push origin HEAD:mcworldhost && break || sleep $((i*3))
+            done
+          fi
+
+      - name: Upload snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcwh-rescue
+          path: |
+            mcwh/mcwh_debug_*.png
+            mcwh/mcwh_debug_*.txt
+            mcwh/mcwh_actions.json
+          if-no-files-found: ignore

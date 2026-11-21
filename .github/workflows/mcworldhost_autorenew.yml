@@ -1,0 +1,87 @@
+name: MCWorldHost Auto Renew (7d)
+
+# 每 2 小时巡逻一次：余额 ≥ 500 且 7 天套餐没锁 → 立刻买 7 天。
+# 余额不够但运行时间 < 12h → 用 100 币的 runtime_24h 兜底（能买几次买几次）。
+# 任何购买失败都显式报错（不会再像 2026-11-16 那样静默吞掉导致过期）。
+on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      min_hours:
+        description: '运行时间低于多少小时触发 24h 兜底（默认 12）'
+        required: false
+        default: '12'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcwh-autorenew
+  cancel-in-progress: false
+
+jobs:
+  patrol:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout mcworldhost branch (scripts live there)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: mcwh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --quiet playwright==1.58.0
+          python -m playwright install --with-deps chromium
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+
+      - name: Start Cloudflare WARP SOCKS5 proxy
+        run: |
+          set -e
+          mkdir -p /tmp/warp && cd /tmp/warp
+          curl -fsSL -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.32/wgcf_2.2.32_linux_amd64
+          chmod +x wgcf
+          curl -fsSL -o wireproxy.tar.gz https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz
+          tar -xzf wireproxy.tar.gz && chmod +x wireproxy
+          WARP_PROFILE="${{ secrets.MCWH_WARP_PROFILE }}"
+          if [ -n "$WARP_PROFILE" ]; then
+            printf '%s\n[Socks5]\nBindAddress = 127.0.0.1:40000\n' "$WARP_PROFILE" > wgcf-profile.conf
+          else
+            ./wgcf register --accept-tos && ./wgcf generate
+            printf '\n[Socks5]\nBindAddress = 127.0.0.1:40000\n' >> wgcf-profile.conf
+          fi
+          nohup ./wireproxy -c wgcf-profile.conf > /tmp/warp/wireproxy.log 2>&1 &
+          ok=0
+          for i in $(seq 1 25); do
+            if curl -fsS --max-time 6 -x socks5h://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace > /tmp/warp/trace; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" = "1" ]; then echo "WARP_OK=1" >> $GITHUB_ENV; else echo "WARP_OK=0" >> $GITHUB_ENV; fi
+
+      - name: 自动续期巡逻
+        env:
+          MCWH_EMAIL: ${{ secrets.MCWH_EMAIL }}
+          MCWH_PASSWORD: ${{ secrets.MCWH_PASSWORD }}
+          MCWH_PROXY: ${{ env.WARP_OK == '1' && 'socks5://127.0.0.1:40000' || '' }}
+          MCWH_MIN_HOURS: ${{ github.event.inputs.min_hours || '12' }}
+        run: |
+          cd mcwh
+          python .github/scripts/mcworldhost_autorenew.py
+
+      - name: Upload snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcwh-autorenew
+          path: |
+            mcwh/mcwh_debug_*.png
+            mcwh/mcwh_debug_*.txt
+          if-no-files-found: ignore
