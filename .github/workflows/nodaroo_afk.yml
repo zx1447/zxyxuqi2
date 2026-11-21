@@ -1,14 +1,12 @@
 name: Nodaroo AFK
 
-# 节奏（用户指定）：启动后挂满（≈360 分钟）→ 等待半小时 → 继续。
+# 节奏：单次挂机 10 分钟（受 job 15 分钟上限约束），由 cron 每 6 小时触发。
 #
-# GitHub 单 job 硬上限 360 分钟，「挂满 360 + 冷却 30」装不进同一个 job
-# （超时被杀时接力步也一起没了，链会断）。所以拆成两种棒交替：
-#   挂机棒 (phase=1)：挂 355 分钟（留 ~5 分钟余量给环境和派发）
-#                     → 提交登录态 → 派发冷却棒
-#   冷却棒 (phase=2)：不挂机 → 冷却 30 分钟 → 派发下一个挂机棒
-# 一轮 = 355 挂机 + 30 冷却 ≈ 6h25m，每天 ≈ 22.4 小时在挂，理论上限
-# ≈ 1345 credits/天。挂机棒中途断线会自动重连接着挂（站点明确允许）。
+# ⚠️ 2026-11-20 改造：原本设计是「挂 355 分钟 + 冷却 30 分钟 + GH_PAT 接力」，
+#    这种长驻 + 自派发的模式导致仓库被 GitHub 判定滥用 ToS 而封锁。
+#    现在改为「短单轮 + cron 定时」，不再自己派发下一棒。
+#    代价：每天只能挂 4 × 10 = 40 分钟，收益远低于原来的 22.4 小时/天。
+#    如需更多挂机时间，应在本机运行，而不是占用 GitHub Actions。
 #
 # 方案：纯 Python（requests + websockets）直连，无浏览器、无 cf_clearance
 # （CI 实测直连可用：2 分钟 +2 credits 到账）。cf_clearance 与出口 IP 强
@@ -33,7 +31,7 @@ on:
       farm_minutes:
         description: '本棒挂机分钟数（挂机棒默认 355；冷却棒传 0；快测填 2）'
         required: false
-        default: '355'
+        default: '10'
       cooldown_minutes:
         description: '冷却棒等待分钟数（默认 30；快测填 0）'
         required: false
@@ -55,7 +53,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Checkout nodarooAFK branch
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: main
@@ -81,8 +79,8 @@ jobs:
           NODAROO_SESSION_KEY: ${{ secrets.NODAROO_SESSION_KEY }}
           NODAROO_COOKIE: ${{ secrets.NODAROO_COOKIE }}
           NODAROO_VLESS_URL: ${{ secrets.NODAROO_VLESS_URL }}
-          NODAROO_FARM_MINUTES: ${{ github.event.inputs.farm_minutes || inputs.farm_minutes || '355' }}
-          NODAROO_NO_EARN_MINUTES: '10'
+          NODAROO_FARM_MINUTES: ${{ github.event.inputs.farm_minutes || inputs.farm_minutes || '10' }}
+          NODAROO_NO_EARN_MINUTES: '3'
         run: python .github/scripts/nodaroo_afk.py
 
       - name: 提交登录态
@@ -95,9 +93,9 @@ jobs:
             git commit -m "chore(nodarooAFK): 更新登录态 [skip ci]" || echo "无变化"
             # 远端可能被上一棒推过 -> fetch+rebase 重试，避免 non-fast-forward
             for i in 1 2 3; do
-              if git push origin HEAD:nodarooAFK; then break; fi
-              git fetch origin nodarooAFK:nodarooAFK || true
-              git rebase nodarooAFK || git rebase --abort
+              if git push origin HEAD:main; then break; fi
+              git fetch origin main:main || true
+              git rebase origin/main || git rebase --abort
               sleep 5
             done
           fi
