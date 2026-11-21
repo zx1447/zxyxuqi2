@@ -77,7 +77,6 @@ INTERACTION_SUCCESS
 cron 只负责"每天唤醒"，真正节奏由脚本按 `last_click_at` 判定：
 
 - **McServers**：距上次成功点击满 **5 天** 才点（有效期内点了会被拒）
-- **Antagonix**：距上次成功点击满 **2 天** 就点（随时可点），
   另加一道兜底：面板剩余 **≤ 3.5 天** 时无论如何都补一次
 
 每日唤醒 + 脚本内判定：两个目标间隔不同，用日历日 `*/2` 会互相错位，月边界也容易漏；
@@ -99,10 +98,8 @@ Actions → **Discord Panel Renew** → Run workflow
 npm install
 
 export DISCORDERENEW_TOKEN='...'   # McServers 账号
-export ANTAGONIX_TOKEN='...'       # Antagonix 账号
 
 node renew_mcservers.js                    # 两个都处理
-DR_TARGET=antagonix node renew_mcservers.js
 DR_DRY_RUN=1 node renew_mcservers.js
 DR_FORCE=1 node renew_mcservers.js
 ```
@@ -123,5 +120,4 @@ DR_FORCE=1 node renew_mcservers.js
 | 机器人改了按钮 id | 改 `TARGETS` 里对应项的 `customId` |
 
 > ⚠️ Discord 用户 token 会因改密码 / 退出所有设备 / **跨地区使用**被吊销。
-> 之前 Antagonix 的 token 就是拿到 GitHub 美国 IP 用之后被杀的（活不过 2 分钟）。
 > 如果日志报 `401`，需要重新抓 token。

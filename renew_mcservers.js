@@ -7,7 +7,6 @@
 // │ McServers │ 7 天有效期。有效期内点会回 "You can renew again later."   │
 // │           │ 必须等到期才能续。每 5 天探一次。                        │
 // ├───────────┼──────────────────────────────────────────────────────────┤
-// │ Antagonix │ 5 天有效期。**随时可点**，点一次即"从现在起重置 +5 天"。 │
 // │           │ 回文案 "Hébergement renouvelé pour 5 jours..."           │
 // └───────────┴──────────────────────────────────────────────────────────┘
 //
@@ -146,7 +145,6 @@ async function probeChannel(token, t) {
   }
 }
 
-// 读面板消息里的到期时间戳（Antagonix 的 embed 里有 <t:...>）
 async function readExpiry(token, t) {
   if (!t.expiryFromEmbed) return null;
   try {
@@ -344,7 +342,7 @@ async function processTarget(name, t, state) {
   } else if (cls.verdict === 'too-early') {
     log(tag, `⏳ 未到可续期时间（${cls.note}）`);
   } else if (cls.verdict === 'no-reply' && result.ok) {
-    // 没有文案但 204 且 INTERACTION_SUCCESS，按成功处理（Antagonix 常这样）
+    // 没有文案但 204 且 INTERACTION_SUCCESS，按成功处理
     st.last_click_at = new Date().toISOString();
     log(tag, '✅ 点击被受理（无回执文案，按成功计）');
   } else {

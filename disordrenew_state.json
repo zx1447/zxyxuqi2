@@ -8,14 +8,5 @@
     "last_verdict": "unavailable",
     "last_note": "频道不可用（HTTP 404），面板可能在维护或换服",
     "unavailable_since": "2026-11-06T11:24:30.508Z"
-  },
-  "antagonix": {
-    "expiresAt": "2026-11-11T10:43:16.000Z",
-    "remainingDays": 4.97,
-    "last_check_at": "2026-11-06T11:24:30.713Z",
-    "last_note": null,
-    "last_click_at": "2026-11-06T10:43:16.304Z",
-    "_floor": 3.5,
-    "last_verdict": "no-reply"
   }
 }
