@@ -1,7 +1,9 @@
 name: Plugged Keepalive
 
 # plugged.host 免费服守护：检测停止 → 自动开机
-# 目标：mockingbird（嘲鸫）75cd14b3-aaf3-4a1c-a214-dbd787e76d5a
+# 目标（2026-11-21 确认名下两台）：
+#   mockingbird（嘲鸫）75cd14b3-aaf3-4a1c-a214-dbd787e76d5a  12GB / 50GB
+#   AU          3cc1d303-902f-430f-9d6a-6b6459930493   1.3GB / 1.2GB
 #       Minecraft Java · pl2 (Poland) · pl2.plugged.host:34066
 #
 # 设计：每 4 小时定时检测一次，不用长驻循环 + 接力链。
@@ -45,7 +47,7 @@ jobs:
       - name: 检测并拉起
         env:
           PLUGGED_API_KEY: ${{ secrets.PLUGGED_API_KEY }}
-          PLUGGED_SERVERS: '75cd14b3-aaf3-4a1c-a214-dbd787e76d5a'
+          PLUGGED_SERVERS: '75cd14b3-aaf3-4a1c-a214-dbd787e76d5a,3cc1d303-902f-430f-9d6a-6b6459930493'
           POWER_WAIT_SECONDS: '90'
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
