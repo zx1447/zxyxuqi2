@@ -18,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "mcservers / antagonix / all"
+        description: "mcservers / all"
         required: false
-        default: "all"
+        default: "mcservers"
       force:
         description: "true = 无视间隔立即点"
         required: false
@@ -56,8 +56,7 @@ jobs:
       - name: Renew
         env:
           DISCORDERENEW_TOKEN: ${{ secrets.DISCORDERENEW_TOKEN }}
-          ANTAGONIX_TOKEN: ${{ secrets.ANTAGONIX_TOKEN }}
-          DR_TARGET: ${{ inputs.target || 'all' }}
+          DR_TARGET: ${{ inputs.target || 'mcservers' }}
           DR_FORCE: ${{ inputs.force == 'true' && '1' || '0' }}
           DR_DRY_RUN: ${{ inputs.dry_run == 'true' && '1' || '0' }}
           DR_LISTEN_MS: "20000"

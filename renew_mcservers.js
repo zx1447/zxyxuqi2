@@ -30,9 +30,8 @@
 // 所以本脚本连 Discord 网关监听 read-back 来判定真实结果。
 //
 // 环境变量
-//   DR_TARGET=mcservers|antagonix|all        要处理哪个（默认 all）
+//   DR_TARGET=mcservers|all                  要处理哪个（默认 all）
 //   DISCORDERENEW_TOKEN                      McServers 账号 token
-//   ANTAGONIX_TOKEN                          Antagonix 账号 token
 //   DR_FORCE=1                               无视间隔立即点
 //   DR_DRY_RUN=1                             只读状态不点击
 //   DR_GATEWAY=0                             关闭网关（仅凭 204 判定）
@@ -68,23 +67,6 @@ const TARGETS = {
     tooEarlyRe: /you can renew again later|not yet available|too early to renew/i,
     // 从 bot 的纯文本回执里再兜一层（只接受短句，不接收 embed 大段）
     replyOnly: true,
-  },
-  antagonix: {
-    label: 'Antagonix',
-    tokenEnv: 'ANTAGONIX_TOKEN',
-    guild: '1453152446913314950',
-    channel: '1567073787143524383',
-    message: '1567073789395730475',
-    appId: '1565149630260322418',
-    customId: 'b|fa67c4d1a69f9e08bc484195|renew',
-    intervalDays: 2,          // 每 2 天点一次（有效期 5 天，冗余很足）
-    manageable: true,         // 随时可点，点一次重置 +5 天
-    renewalDays: 5,           // 每次续期发放天数，用于到期兜底判定
-    successRe: /h[eé]bergement renouvel[eé]|renouvel[eé] pour \d+ jours/i,
-    tooEarlyRe: /à nouveau plus tard|pas encore|trop t[oô]t/i,
-    replyOnly: true,
-    // 面板 embed 里可以直接读到到期时间戳
-    expiryFromEmbed: true,
   },
 };
 
