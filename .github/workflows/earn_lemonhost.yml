@@ -3,13 +3,13 @@ name: LemonHost AFK Claim
 on:
   # 兜底触发：自派发失败时由这里接上。时间避开整点减少排队。
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "37 */8 * * *"
   workflow_dispatch:
     inputs:
       run_minutes:
         description: "本轮运行分钟数（GitHub 单 job 上限 360）"
         required: false
-        default: "8"
+        default: "5"
       dry_run:
         description: "只探测接口不实际领取 (true/false)"
         required: false
@@ -45,9 +45,9 @@ jobs:
       - name: Run LemonHost AFK claim
         env:
           LEMONHOST_API_KEY: ${{ secrets.LEMONHOST_API_KEY }}
-          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '8' }}
+          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '5' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-          TICK_SECONDS: "65"
+          TICK_SECONDS: "90"
           CAP_STALL_MINUTES: "30"
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
