@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""一次性探针：枚举 billingafk 相关路径 + 读日限额。用完可删。"""
-import json, os, sys, time, urllib.parse
+"""一次性探针：打印 AFK 配置全字段 + 日限额尝试。用完删。"""
+import json, sys
 import skycastle_afk as K
 
 s = K.make_session()
@@ -10,24 +10,22 @@ if not K.restore_cookie(s, st):
     if not K.login(s, st):
         sys.exit(3)
 
-paths = [
-    ("GET",  "/api/user/billingafk"),
-    ("GET",  "/api/user/billingafk/status"),
-    ("GET",  "/api/user/billingafk/stats"),
-    ("GET",  "/api/user/billingafk/limits"),
-    ("GET",  "/api/user/billingafk/session"),
-    ("GET",  "/api/user/billingafk/daily"),
-    ("GET",  "/api/user/billingresourcesnewservers"),
-    ("GET",  "/api/user/billing"),
-    ("GET",  "/api/user/billing/limits"),
-    ("GET",  "/api/user/credits"),
-    ("GET",  "/api/user/daily-limits"),
-    ("POST", "/api/user/billingafk/stop"),
-    ("POST", "/api/user/billingresourcesnewservers/renew"),
-    ("POST", "/api/user/billingresourcesnewservers/531/renew"),
-]
-for m, p in paths:
-    code, body = K.call(s, m, p, {} if m == "POST" else None)
-    t = json.dumps(body, ensure_ascii=False) if isinstance(body, (dict, list)) else str(body)
-    print(f"{m:5} {p:52} {code}  {t[:260]}", flush=True)
-    time.sleep(1)
+code, body = K.call(s, "GET", "/api/user/billingafk/status")
+d = (body or {}).get("data") or {}
+print("\n=== /billingafk/status 全字段 ===", flush=True)
+for k, v in d.items():
+    if k == "javascript_injection":
+        print(f"\n--- {k} ---", flush=True)
+        print(v, flush=True)
+        print("--- end ---\n", flush=True)
+    else:
+        print(f"{k} = {v!r}", flush=True)
+
+code, body = K.call(s, "GET", "/api/user/billingafk/stats")
+print("\n=== /stats ===", flush=True)
+print(json.dumps((body or {}).get("data"), ensure_ascii=False), flush=True)
+
+for p in ("/api/user/billingafk/limits", "/api/user/billingafk/daily-limits",
+          "/api/user/billingafk/usage", "/api/user/billingafk/sessions"):
+    code, body = K.call(s, "GET", p)
+    print(f"{p} -> {code} {json.dumps(body, ensure_ascii=False)[:200] if isinstance(body,(dict,list)) else body}", flush=True)
