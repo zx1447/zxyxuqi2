@@ -1,66 +1,112 @@
-# SkyCastle（panel.skycastle.us）AFK 挂机
+# SkyCastle AFK 挂机
 
-**⚠️ 状态：接口来自用户浏览器抓包，沙箱侧站点当前不可达，逻辑尚未真实跑通。**
-
-## 已知接口
-
-两个都是 `POST`，返回 `200`（实测抓包）：
+**状态：✅ 已在 GitHub Actions 真实跑通并赚到 credit。**
 
 ```
-POST /api/user/billingafk/start     开始 AFK 计费
-POST /api/user/billingafk/work      工作 / 心跳（需按站点要求周期调用）
+💓 work → 200 · {"credits_awarded":1,"total_credits":1,"total_afk_time":10,"session_active":true}
 ```
 
-请求体：抓包时没看到 payload，脚本默认发 `{}`。
-**首次真实运行请先看响应体**，如果要求带字段（如 `sessionId` / `token`），补进 `afk_start()` / `afk_work()`。
+## 一句话方案
+
+**纯 HTTP，直连，不用住宅代理。**
+
+GitHub Actions runner 出口（境外机房 IP）能直接访问本站；
+只有本机/本地沙箱出口会被 TLS 层拒绝。所以完全不需要住宅代理。
+
+## 实测数据
+
+### 收益模型
+
+`work` 每 **60 秒**（服务端硬限）调用一次，每次推进 `total_afk_time` +1 分钟。
+**累积到第 10 分钟产出 1 credit。**
+
+```
+13:07:31  total_afk_time: 6   credits 0
+13:08:37  total_afk_time: 7   credits 0
+13:09:42  total_afk_time: 8   credits 0
+13:10:47  total_afk_time: 9   credits 0
+13:11:52  total_afk_time: 10  credits 1   ← 产出
+```
+
+→ **约 10 分钟 = 1 credit。**
+
+### 频率硬限
+
+`work` 少于 60 秒调用会被拒：
+
+```
+HTTP 429 {"error_code":"RATE_LIMIT_EXCEEDED",
+          "message":"Please wait at least 60 seconds (1 minute) between work calls."}
+```
+
+脚本默认间隔 **65 秒**（留 5 秒余量）。
+
+### 续期信息
+
+```
+GET /api/user/billingresourcesnewservers/renewals
+{
+  "queue": [],
+  "renewals": [{
+    "id": 531, "server_id": 531, "user_id": 452,
+    "renewal_cost": 1,          ← 续一次花 1 credit
+    "period_days": 3,           ← 续一次管 3 天
+    "renews_at": "2026-11-25 11:53:12",
+    "last_renewed_at": null,
+    "auto_renew": 0,
+    "renewal_count": 0,
+    "status": "active"
+  }]
+}
+```
+
+**关键换算**：续期要 1 credit / 3 天 → 每天约 0.33 credit → 每天挂约 3.5 分钟就够。
+换句话说，单轮 14 分钟的 AFK 就能攒够好几天。
+
+## 接口全集
+
+```
+GET  /api/selftest                                   连通自检（免登录）
+     → {"success":true,"data":{"status":"ready","checks":{redis,mysql,permissions}}}
+
+GET  /api/user/billingresourcesnewservers/renewals   续期信息
+
+POST /api/user/billingafk/start   {"action":"start"}
+     → {"message":"AFK session already active","data":{"session_active":true,...}}
+
+POST /api/user/billingafk/work    {"action":"work"}     ← 17 字节，与抓包 content-length 吻合
+     → {"message":"AFK stats updated",
+        "data":{"credits_awarded":N,"total_credits":N,"total_afk_time":N,"session_active":true}}
+```
+
+`start` 的请求体是按 `work` 的规律推定的（抓包里 start 的 content-length 未给出）。
+实测 `{"action":"start"}` 正常工作。
 
 ## 登录：Discord OAuth（无需密码）
 
 ```
 GET  /api/user/auth/discord/login
-     → 302 到 discord.com/oauth2/authorize
-       client_id = 1317246734530908221
-       scope     = identify email
+     → 302 discord.com/oauth2/authorize
+       client_id = 1317246734530908221, scope = identify email
 POST https://discord.com/api/v9/oauth2/authorize   （带 Discord token）
      body {"permissions":"0","authorize":true,"integration_type":0,
            "guild_id":null,"channel_id":null,"captcha_key":null}
      → {"location": ".../api/user/auth/discord/callback?code=..."}
-GET  <那个 location>  → 302 到 /auth/login?discord_token=<handoff>
-PUT  /api/user/auth/login   {"discord_token":"<handoff>"}
-     → 200 {"success":true,"data":{"user":{...}}}
+GET  <该 location>  → 302 /auth/login?discord_token=<handoff>
+PUT  /api/user/auth/login  {"discord_token":"<handoff>"}   → 200
 ```
 
-成功后下发 `remember_token` cookie，**有效期 30 天**，脚本会存进 `skycastle_state.json` 复用。
+成功后下发 `remember_token`（30 天），存进 `skycastle_state.json` 复用，免重复走 OAuth。
 
-实测账号：
-
-```
-用户 laihate · id 452
-uuid  b2b58507-c67d-4ee7-9a7d-c6775554accf
-email 450144yy@gmail.com
-```
-
-## 已有服务器
-
-```
-GET /api/user/servers
-  id=531  uuid=badd5f53-d84e-4f05-a22e-571d93acdb9e  name=nice  status=running
-```
+账号：`laihate` / id 452 / uuid `b2b58507-c67d-4ee7-9a7d-c6775554accf`
 
 ## 用法
 
 ```bash
-# 先看请求（不发真实请求）
-SC_DISCORD_TOKEN=xxx python3 skycastle_afk.py --dry
-
-# 单轮验证（start 一次 + work 一次）
-SC_DISCORD_TOKEN=xxx python3 skycastle_afk.py --once
-
-# 正常挂机（默认 14 分钟上限，每 60 秒一次 work）
-SC_DISCORD_TOKEN=xxx python3 skycastle_afk.py
-
-# 走住宅代理
-SC_DISCORD_TOKEN=xxx SC_PROXY=socks5h://127.0.0.1:10809 python3 skycastle_afk.py
+python3 skycastle_afk.py --dry     # 只打印计划，不发请求
+python3 skycastle_afk.py --probe   # 只验连通 + 鉴权（selftest + renewals）
+python3 skycastle_afk.py --once    # start + 一次 work
+python3 skycastle_afk.py           # 正常挂机（14 分钟上限，65 秒一次）
 ```
 
 ## 环境变量
@@ -69,37 +115,22 @@ SC_DISCORD_TOKEN=xxx SC_PROXY=socks5h://127.0.0.1:10809 python3 skycastle_afk.py
 |---|---|---|---|
 | `SC_DISCORD_TOKEN` | ✅ | — | Discord 用户 token |
 | `SC_BASE` | — | `https://panel.skycastle.us` | 面板地址 |
-| `SC_PROXY` | — | 空 | `socks5h://host:port` |
-| `SC_WORK_INTERVAL` | — | `60` | work 调用间隔（秒） |
-| `SC_MAX_MINUTES` | — | `14` | 单轮上限（分钟） |
+| `SC_PROXY` | — | 空（直连） | 仅在 runner 出口被封时才填 |
+| `SC_WORK_INTERVAL` | — | `65` | work 间隔（服务端限 60s） |
+| `SC_MAX_MINUTES` | — | `14` | 单轮上限 |
 
 ## 退出码
 
-`0` 正常 · `2` 有失败 · `3` 登录失败 · `4` 接口不符合预期
+`0` 正常 · `2` 有失败 · `3` 登录/连通失败 · `4` 接口异常
 
-## 阻塞点：站点侧拒绝 TLS 握手
+## 排队
 
-2026-11-22 12:3x UTC 起，`panel.skycastle.us`（`49.13.124.85`）无法建立 TLS：
+workflow 在 `main`（`.github/workflows/skycastle_afk.yml`），cron `41 */6 * * *`，单轮 ≤14 分钟。
+代码在本 `skycastle` 分支。
 
-| 检查 | 结果 |
-|---|---|
-| DNS | `49.13.124.85` ✅ |
-| TCP 443 | ✅ 可连 |
-| **TLS 握手** | ❌ 超时（curl / python / requests 均如此） |
-| 换 SNI（`skycastle.us` / `example.com`） | ❌ 同样超时 → **与 SNI 无关** |
-| 直连 vs 住宅代理 `83.168.94.237` | ❌ 都一样 |
-| 同期其他站点（代理内） | ✅ 200 → 代理本身正常 |
-| 根域 `skycastle.us` | ✅ 200（Cloudflare） |
+## 待确认
 
-**结论**：这不是 SNI 封锁，也不是单纯 IP 维度封锁（住宅 IP 同样被拒），
-而是这台源站整体不再正常响应 TLS。只能等站点侧恢复。
-
-## 待确认（拿到响应体后才能定）
-
-1. `billingafk/work` 的**最短/最长调用间隔**——太慢可能不计费，太快可能被判刷
-2. 是否需要人类活动证据（有些站要求随机鼠标事件）
-3. 单次收益 / 日上限 / 冷却
-4. 收益的用途（换服务器时长？还是商店币？）
-5. 是否有 `stop` / `status` 类接口
-
-站点恢复后按上面清单实测，把结论补进本文件。
+1. 日上限是多少（跑了 10 分钟拿 1 credit，还没见到天花板）
+2. `total_afk_time` 是否按 session 累计、session 会不会过期
+3. 是否有自动续期接口（`auto_renew: 0` 这个字段暗示可能存在）
+4. 需不需要偶尔调 `renewals` 之外的续期接口把 credit 花掉
