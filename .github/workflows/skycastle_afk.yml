@@ -66,7 +66,7 @@ jobs:
         if: ${{ github.event.inputs.mode != 'probe' }}
         env:
           SC_DISCORD_TOKEN: ${{ secrets.SC_DISCORD_TOKEN || secrets.DISCORD_TOKEN }}
-          SC_WORK_INTERVAL: '30'
+          SC_WORK_INTERVAL: '65'
           SC_MAX_MINUTES: ${{ github.event.inputs.run_minutes || '14' }}
           SC_PROXY: ${{ github.event.inputs.use_proxy == 'true' && secrets.SC_PROXY || '' }}
         run: python3 skycastle_afk.py

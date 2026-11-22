@@ -9,7 +9,8 @@
   GET  /api/selftest                                  连通性自检
   GET  /api/user/billingresourcesnewservers/renewals  续期信息
   POST /api/user/billingafk/start                     开始 AFK
-  POST /api/user/billingafk/work                      心跳（**每 30 秒**一次）
+  POST /api/user/billingafk/work                      心跳，**服务端限 60 秒最小间隔**
+      429 RATE_LIMIT_EXCEEDED: "Please wait at least 60 seconds between work calls"
 
 请求体：work 的 content-length 是 17 字节
   → {"action":"work"} 正好 17 字节，据此推定（start 同理用 {"action":"start"}）
@@ -22,7 +23,7 @@
   SC_BASE            默认 https://panel.skycastle.us
   SC_PROXY           可选 "socks5h://127.0.0.1:10809"
                      ⚠️ 默认**不使用**。只有确认 runner 出口被封时才配。
-  SC_WORK_INTERVAL   work 间隔秒，默认 30（按抓包两个 work 相隔约 30s）
+  SC_WORK_INTERVAL   work 间隔秒，默认 65（服务端限 60s，留余量）
   SC_MAX_MINUTES     单轮上限分钟，默认 14
 
 用法：
@@ -46,7 +47,7 @@ import requests
 BASE = (os.environ.get("SC_BASE") or "https://panel.skycastle.us").rstrip("/")
 DISCORD_TOKEN = (os.environ.get("SC_DISCORD_TOKEN") or "").strip()
 PROXY = (os.environ.get("SC_PROXY") or "").strip()
-WORK_INTERVAL = int(os.environ.get("SC_WORK_INTERVAL") or 30)
+WORK_INTERVAL = int(os.environ.get("SC_WORK_INTERVAL") or 65)  # 服务端硬限 60s，留 5s 余量
 MAX_MINUTES = int(os.environ.get("SC_MAX_MINUTES") or 14)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skycastle_state.json")
 
@@ -267,6 +268,8 @@ def main():
             st["last_work_http"] = code
             st["work_count"] = st.get("work_count", 0) + 1
             save_state(st)
+            if code == 429:
+                log("⏱  429 频率限制，下轮拉长间隔")
             if code in (401, 403):
                 log("🔐 会话失效，重登")
                 st.pop("remember_token", None)
