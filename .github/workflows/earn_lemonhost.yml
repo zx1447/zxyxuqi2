@@ -28,10 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout clean lemo branch
+      - name: Checkout lemo branch（代码在 lemo，workflow 在 main）
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: lemo
           fetch-depth: 0
 
       - name: Setup Python
