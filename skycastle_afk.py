@@ -5,6 +5,17 @@
 方案：纯 HTTP，**直连**（不走住宅代理）。
   GitHub Actions runner 出口可直连站点；本地沙箱出口 TLS 被拒，属环境差异。
 
+实测配置（GET /api/user/billingafk/status）：
+  credits_per_minute           0.1     → 10 分钟 = 1 credit
+  reward_interval_seconds      60      → work 最小 60 秒
+  max_credits_per_day          "50"
+  max_sessions_per_day         "3"     ← 每次 start/stop 计 1 个 session
+  max_time_per_day_seconds     "30000" → 8.33 小时
+  require_claim                True
+  require_active_tab           True    ← 纯 HTTP 无法满足，属服务端校验
+  require_captcha              False
+  daily_usage                  {credits_earned_today, sessions_today, time_seconds_today}
+
 接口（用户浏览器抓包确认，均 200）：
   GET  /api/selftest                                  连通性自检
   GET  /api/user/billingresourcesnewservers/renewals  续期信息
@@ -208,6 +219,18 @@ def renewals(s):
     return show("📋 renewals", st, body)
 
 
+def afk_status(s):
+    """读配置 + 日限额。返回 data dict 或 {}。"""
+    st, body = call(s, "GET", "/api/user/billingafk/status")
+    d = (body or {}).get("data") if isinstance(body, dict) else None
+    return d or {}
+
+
+def afk_stop(s):
+    st, body = call(s, "POST", "/api/user/billingafk/stop", {"action": "stop"})
+    return show("⏹  stop ", st, body)
+
+
 def afk_start(s):
     if DRY:
         log('🔍 [dry] POST /api/user/billingafk/start  {"action":"start"}')
@@ -252,12 +275,39 @@ def main():
         log("✅ probe 结束")
         return 0
 
-    # 3) 开始 AFK
+    # 3) 读配置 + 日限额，决定本轮能挂多久
+    info = afk_status(s)
+    if info:
+        du = info.get("daily_usage") or {}
+        dl = info.get("daily_limits") or {}
+        log(f"📊 日限额：credits {du.get('credits_earned_today', '?')}/"
+            f"{dl.get('max_credits_per_day', '?')} · "
+            f"sessions {du.get('sessions_today', '?')}/{dl.get('max_sessions_per_day', '?')} · "
+            f"时长 {du.get('time_seconds_today', '?')}s/"
+            f"{dl.get('max_time_per_day_seconds', '?')}s · "
+            f"余额 {info.get('user_credits')} credits")
+        log(f"⚙️  收益 {info.get('credits_per_minute')} credit/分钟 · "
+            f"work 间隔 {info.get('reward_interval_seconds')}s · "
+            f"require_claim={info.get('require_claim')} · "
+            f"require_active_tab={info.get('require_active_tab')}")
+        if info.get("is_enabled") is False:
+            log("🚫 AFK 已停用（is_enabled=false），终止")
+            return 4
+        if str(du.get("sessions_today", 0)) >= str(dl.get("max_sessions_per_day", 99)):
+            log("🚫 今日 session 已用尽，终止")
+            return 4
+        st["daily_usage"] = du
+        st["user_credits"] = info.get("user_credits")
+        save_state(st)
+    else:
+        log("⚠️ 读不到 status（可能鉴权失败），继续但不做限额保护")
+
+    # 4) 开始 AFK
     if afk_start(s) not in (0, 200) and not DRY:
         log("❌ start 失败，终止")
         return 4
 
-    # 4) 心跳循环
+    # 5) 心跳循环
     n = 0
     deadline = time.time() + (0 if ONCE else MAX_MINUTES * 60)
     while True:
