@@ -1,0 +1,83 @@
+name: SkyCastle AFK
+
+# SkyCastle (panel.skycastle.us) AFK 挂机 —— 纯 HTTP，直连，不用住宅代理。
+#
+# 接口（浏览器抓包确认）：
+#   GET  /api/selftest                                   连通自检
+#   GET  /api/user/billingresourcesnewservers/renewals   续期信息
+#   POST /api/user/billingafk/start                      开始 AFK
+#   POST /api/user/billingafk/work                       心跳，每 30 秒
+#
+# 代码在 skycastle 分支，workflow 在 main（分支结构约定）。
+
+on:
+  schedule:
+    - cron: '41 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      run_minutes:
+        description: '本轮上限（分钟，≤15）'
+        required: false
+        default: '14'
+      mode:
+        description: 'probe（只验证连通+鉴权）/ afk（正常挂机）'
+        required: false
+        default: 'afk'
+      use_proxy:
+        description: '是否走住宅代理（默认否；仅在 runner 直连被封时才开）'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: skycastle-afk-${{ github.ref_name || 'manual' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  afk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: skycastle        # 代码在 skycastle 分支，workflow 在 main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install requests requests[socks]
+
+      - name: 连通性 + 鉴权自检
+        id: probe
+        env:
+          SC_DISCORD_TOKEN: ${{ secrets.SC_DISCORD_TOKEN || secrets.DISCORD_TOKEN }}
+        run: |
+          set +e
+          python3 skycastle_afk.py --probe
+          echo "probe_rc=$?" >> $GITHUB_OUTPUT
+
+      - name: AFK 循环
+        if: ${{ github.event.inputs.mode != 'probe' }}
+        env:
+          SC_DISCORD_TOKEN: ${{ secrets.SC_DISCORD_TOKEN || secrets.DISCORD_TOKEN }}
+          SC_WORK_INTERVAL: '30'
+          SC_MAX_MINUTES: ${{ github.event.inputs.run_minutes || '14' }}
+          SC_PROXY: ${{ github.event.inputs.use_proxy == 'true' && secrets.SC_PROXY || '' }}
+        run: python3 skycastle_afk.py
+
+      - name: 回写状态
+        if: always()
+        run: |
+          git config user.name 'zx-build'
+          git config user.email 'build@zx.local'
+          if ! git diff --quiet skycastle_state.json 2>/dev/null || ! git diff --cached --quiet skycastle_state.json 2>/dev/null; then
+            git add skycastle_state.json
+            git commit -m "state: skycastle [skip ci]" || true
+            git push origin HEAD:skycastle || true
+          fi

@@ -2,27 +2,36 @@
 # -*- coding: utf-8 -*-
 """SkyCastle (panel.skycastle.us) AFK 挂机。
 
-⚠️ 状态：接口来自用户浏览器实测抓包，沙箱侧站点当时不可达，逻辑未经真实跑通。
-   首次运行请用 --dry 先看请求，再用 --once 单轮验证。
+方案：纯 HTTP，**直连**（不走住宅代理）。
+  GitHub Actions runner 出口可直连站点；本地沙箱出口 TLS 被拒，属环境差异。
 
-已知接口（用户抓包确认，均为 POST，返回 200）：
-  POST /api/user/billingafk/start    开始 AFK 计费
-  POST /api/user/billingafk/work     工作/心跳（需按站点要求周期调用）
+接口（用户浏览器抓包确认，均 200）：
+  GET  /api/selftest                                  连通性自检
+  GET  /api/user/billingresourcesnewservers/renewals  续期信息
+  POST /api/user/billingafk/start                     开始 AFK
+  POST /api/user/billingafk/work                      心跳（**每 30 秒**一次）
 
-登录：Discord OAuth（无需密码）
-  GET  /api/user/auth/discord/login                → 302 discord authorize
-  POST https://discord.com/api/v9/oauth2/authorize （带 Discord token）
-  GET  <callback>                                  → /auth/login?discord_token=<handoff>
-  PUT  /api/user/auth/login {"discord_token":...}  → 200 + remember_token cookie(30天)
+请求体：work 的 content-length 是 17 字节
+  → {"action":"work"} 正好 17 字节，据此推定（start 同理用 {"action":"start"}）
+
+登录：Discord OAuth → PUT /api/user/auth/login {"discord_token":...}
+      成功后 remember_token cookie 有效期 30 天，存 state 复用。
 
 环境变量：
   SC_DISCORD_TOKEN   Discord 用户 token（必填）
   SC_BASE            默认 https://panel.skycastle.us
-  SC_PROXY           socks5h://127.0.0.1:10809（可选；沙箱/机房 IP 直连 TLS 会被拒）
-  SC_WORK_INTERVAL   work 调用间隔秒数，默认 60
+  SC_PROXY           可选 "socks5h://127.0.0.1:10809"
+                     ⚠️ 默认**不使用**。只有确认 runner 出口被封时才配。
+  SC_WORK_INTERVAL   work 间隔秒，默认 30（按抓包两个 work 相隔约 30s）
   SC_MAX_MINUTES     单轮上限分钟，默认 14
 
-退出码：0 正常；2 有失败；3 登录失败；4 接口不符合预期
+用法：
+  python3 skycastle_afk.py --dry      只打印计划，不发请求
+  python3 skycastle_afk.py --probe    只做 selftest + renewals，验证连通与鉴权
+  python3 skycastle_afk.py --once     start + 一次 work
+  python3 skycastle_afk.py            正常挂机
+
+退出码：0 正常；2 有失败；3 登录/连通失败；4 接口异常
 """
 from __future__ import annotations
 
@@ -37,15 +46,16 @@ import requests
 BASE = (os.environ.get("SC_BASE") or "https://panel.skycastle.us").rstrip("/")
 DISCORD_TOKEN = (os.environ.get("SC_DISCORD_TOKEN") or "").strip()
 PROXY = (os.environ.get("SC_PROXY") or "").strip()
-WORK_INTERVAL = int(os.environ.get("SC_WORK_INTERVAL") or 60)
+WORK_INTERVAL = int(os.environ.get("SC_WORK_INTERVAL") or 30)
 MAX_MINUTES = int(os.environ.get("SC_MAX_MINUTES") or 14)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skycastle_state.json")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36")
+      "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0")
 
 DRY = "--dry" in sys.argv
 ONCE = "--once" in sys.argv
+PROBE = "--probe" in sys.argv
 
 
 def log(*a):
@@ -57,10 +67,14 @@ def make_session():
     s.trust_env = False
     s.headers.update({
         "User-Agent": UA,
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Content-Type": "application/json",
         "Origin": BASE,
         "Referer": BASE + "/dashboard/earn/afk",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
     })
     if PROXY:
         s.proxies.update({"http": PROXY, "https": PROXY})
@@ -83,20 +97,18 @@ def save_state(st):
 
 
 def restore_cookie(s, st):
-    """复用 remember_token（有效期 30 天），免每次走 OAuth。"""
     tok = st.get("remember_token")
     if not tok:
         return False
     s.cookies.set("remember_token", tok, domain=urllib.parse.urlparse(BASE).hostname, path="/")
     try:
         r = s.get(BASE + "/api/user/session", timeout=30)
-        return r.status_code == 200 and r.json().get("success") is not False
+        return r.status_code == 200 and (r.json() or {}).get("success") is not False
     except Exception:
         return False
 
 
 def login(s, st):
-    """Discord OAuth → PUT /api/user/auth/login。成功返回 True。"""
     if not DISCORD_TOKEN:
         log("❌ 缺少 SC_DISCORD_TOKEN")
         return False
@@ -105,9 +117,10 @@ def login(s, st):
     try:
         r = s.get(BASE + "/api/user/auth/discord/login", allow_redirects=True, timeout=40)
     except Exception as exc:
-        log(f"❌ 无法连接 {BASE}：{type(exc).__name__}: {exc}")
-        log("   站点侧 TLS 握手被拒（直连与住宅代理同样失败），请确认站点可用或更换 SC_PROXY")
+        log(f"❌ 无法连接 {BASE}：{type(exc).__name__}")
+        log("   若本机出口被封，属环境问题；GitHub Actions runner 通常可直连。")
         return False
+
     q = urllib.parse.parse_qs(urllib.parse.urlparse(r.url).query)
     if "client_id" not in q:
         log(f"❌ 未拿到 authorize URL：HTTP {r.status_code}")
@@ -121,7 +134,6 @@ def login(s, st):
         "redirect_uri": q["redirect_uri"][0],
         "prompt": "consent",
     })
-    # Discord 侧不经过 SC_PROXY（本就在境外，且走代理更慢）
     dr = requests.post(
         auth_url,
         json={"permissions": "0", "authorize": True, "integration_type": 0,
@@ -157,87 +169,116 @@ def login(s, st):
     return True
 
 
-def post(s, path, payload=None):
-    """带重试的 POST，返回 (status, json_or_text)。"""
-    for i in range(4):
+def call(s, method, path, payload=None, retries=4):
+    """返回 (status, parsed_or_text)。status=0 表示网络异常。"""
+    for i in range(retries):
         try:
-            r = s.post(BASE + path, json=payload if payload is not None else {},
-                       timeout=40, allow_redirects=False)
+            r = s.request(method, BASE + path,
+                          json=payload if payload is not None else None,
+                          timeout=40, allow_redirects=False)
             body = r.text
             try:
                 return r.status_code, json.loads(body)
             except ValueError:
-                return r.status_code, body[:300]
+                return r.status_code, body[:400]
         except Exception as exc:
-            if i == 3:
+            if i == retries - 1:
                 return 0, f"{type(exc).__name__}: {exc}"
             time.sleep(2 + i * 2)
+    return 0, "unreachable"
+
+
+def show(tag, st, body):
+    if isinstance(body, (dict, list)):
+        txt = json.dumps(body, ensure_ascii=False)
+    else:
+        txt = str(body)
+    log(f"{tag} → HTTP {st} · {txt[:320]}")
+    return st
+
+
+def selftest(s):
+    st, body = call(s, "GET", "/api/selftest")
+    return show("🩺 selftest", st, body)
+
+
+def renewals(s):
+    st, body = call(s, "GET", "/api/user/billingresourcesnewservers/renewals")
+    return show("📋 renewals", st, body)
 
 
 def afk_start(s):
     if DRY:
-        log("🔍 [dry] POST /api/user/billingafk/start {}")
-        return 0, {}
-    st, body = post(s, "/api/user/billingafk/start")
-    log(f"▶️  start → HTTP {st} · {json.dumps(body, ensure_ascii=False)[:200] if isinstance(body, (dict, list)) else body}")
-    return st, body
+        log('🔍 [dry] POST /api/user/billingafk/start  {"action":"start"}')
+        return 0
+    st, body = call(s, "POST", "/api/user/billingafk/start", {"action": "start"})
+    return show("▶️  start", st, body)
 
 
 def afk_work(s):
     if DRY:
-        log("🔍 [dry] POST /api/user/billingafk/work {}")
+        log('🔍 [dry] POST /api/user/billingafk/work  {"action":"work"}')
         return 0, {}
-    st, body = post(s, "/api/user/billingafk/work")
-    ok = st == 200
-    log(f"{'💓' if ok else '⚠️'} work  → HTTP {st} · "
-        f"{json.dumps(body, ensure_ascii=False)[:200] if isinstance(body, (dict, list)) else body}")
+    st, body = call(s, "POST", "/api/user/billingafk/work", {"action": "work"})
+    show("💓 work ", st, body)
     return st, body
 
 
 def main():
-    log(f"🎯 SkyCastle AFK 挂机 · proxy={'on' if PROXY else 'off'} · "
+    log(f"🎯 SkyCastle AFK · {'DRY ' if DRY else ''}{'PROBE ' if PROBE else ''}"
+        f"{'ONCE ' if ONCE else ''}· proxy={'ON' if PROXY else 'OFF(直连)'} · "
         f"interval={WORK_INTERVAL}s · max={MAX_MINUTES}min")
+
     s = make_session()
     st = load_state()
 
+    # 0) 连通性自检（不需要登录）
+    code = selftest(s)
+    if code == 0:
+        log("❌ 本站不可达，终止")
+        return 3
+
+    # 1) 登录
     if not restore_cookie(s, st):
         if not login(s, st):
-            log("❌ 登录不可用，退出")
             return 3
     else:
         log("♻️  复用 remember_token")
 
-    # 1) 开始 AFK
-    st_code, start_body = afk_start(s)
-    if not DRY and st_code != 200:
-        log(f"❌ start 失败，终止。HTTP {st_code}")
+    # 2) 续期信息（同时验证鉴权是否真的生效）
+    renewals(s)
+    if PROBE:
+        log("✅ probe 结束")
+        return 0
+
+    # 3) 开始 AFK
+    if afk_start(s) not in (0, 200) and not DRY:
+        log("❌ start 失败，终止")
         return 4
 
-    # 2) 周期性 work
+    # 4) 心跳循环
     n = 0
-    deadline = time.time() + (0 if ONCE else (MAX_MINUTES * 60))
+    deadline = time.time() + (0 if ONCE else MAX_MINUTES * 60)
     while True:
         n += 1
-        st_code, body = afk_work(s)
+        code, body = afk_work(s)
         if not DRY:
             st["last_work_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            st["last_work_http"] = st_code
+            st["last_work_http"] = code
             st["work_count"] = st.get("work_count", 0) + 1
             save_state(st)
-            if st_code in (401, 403):
-                log("🔐 会话失效，重新登录")
+            if code in (401, 403):
+                log("🔐 会话失效，重登")
                 st.pop("remember_token", None)
                 save_state(st)
                 if not login(s, st):
                     return 3
                 afk_start(s)
-            elif st_code == 0:
-                log("⚠️ 网络异常，下轮重试")
         if ONCE or time.time() + WORK_INTERVAL >= deadline:
             break
         time.sleep(WORK_INTERVAL)
 
-    log(f"✅ 本轮完成，work 调用 {n} 次")
+    log(f"✅ 本轮完成，work × {n}")
     return 0
 
 
