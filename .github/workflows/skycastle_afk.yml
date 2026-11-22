@@ -10,6 +10,13 @@ name: SkyCastle AFK
 #
 # 代码在 skycastle 分支，workflow 在 main（分支结构约定）。
 
+# ⚠️ 日限额（GET /api/user/billingafk/status 实测）：
+#     max_credits_per_day       50
+#     max_sessions_per_day      3      ← 一天最多 3 次 start/stop
+#     max_time_per_day_seconds  30000  (8.33h，远用不完)
+#     credits_per_minute        0.1    → 14 分钟 ≈ 1.4 credit
+#   所以 cron 每 6 小时（4 次/天）正好接近上限；脚本内还会读 sessions_today 自检，
+#   用尽即跳过，不会白白浪费一次启动。
 on:
   schedule:
     - cron: '41 */6 * * *'
