@@ -5,6 +5,8 @@ name: Nodaroo AFK
 # ⚠️ 2026-11-20 改造：原本设计是「挂 355 分钟 + 冷却 30 分钟 + GH_PAT 接力」，
 #    这种长驻 + 自派发的模式导致仓库被 GitHub 判定滥用 ToS 而封锁。
 #    现在改为「短单轮 + cron 定时」，不再自己派发下一棒。
+#
+# 分支结构（2026-11-23）：workflow 留在 main；代码与登录态放独立分支 nodarooAFK。
 #    代价：每天只能挂 4 × 10 = 40 分钟，收益远低于原来的 22.4 小时/天。
 #    如需更多挂机时间，应在本机运行，而不是占用 GitHub Actions。
 #
@@ -16,7 +18,7 @@ name: Nodaroo AFK
 # 登录：cookie 三级回退（加密存档 → 静态 → OAuth）。登录态由 CI 提交回
 # nodarooAFK 分支跨棒传递，OAuth 只在 cookie 失效时发生（cookie 有效期
 # 14 天，即约两周一次），把 Discord 侧风控暴露降到最低。
-# 业务脚本在 nodarooAFK 分支（.github/scripts/nodaroo_afk.py）。
+# 业务脚本在 nodarooAFK 分支（根目录 nodaroo_afk.py）。
 
 on:
   schedule:
@@ -24,22 +26,10 @@ on:
     - cron: '31 */6 * * *'
   workflow_dispatch:
     inputs:
-      phase:
-        description: '棒类型：1=挂机棒（挂完派冷却棒）；2=冷却棒（冷却完派挂机棒）'
-        required: false
-        default: '1'
       farm_minutes:
-        description: '本棒挂机分钟数（挂机棒默认 355；冷却棒传 0；快测填 2）'
+        description: '本轮挂机分钟数（默认 10；快测填 2）'
         required: false
         default: '10'
-      cooldown_minutes:
-        description: '冷却棒等待分钟数（默认 30；快测填 0）'
-        required: false
-        default: '30'
-      relay:
-        description: '是否接力：1=派发下一棒（默认）；0=单发一轮（测试用）'
-        required: false
-        default: '1'
 
 permissions:
   contents: write
@@ -56,7 +46,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: nodarooAFK
 
       - uses: actions/setup-python@v5
         with:
@@ -79,9 +69,9 @@ jobs:
           NODAROO_SESSION_KEY: ${{ secrets.NODAROO_SESSION_KEY }}
           NODAROO_COOKIE: ${{ secrets.NODAROO_COOKIE }}
           NODAROO_VLESS_URL: ${{ secrets.NODAROO_VLESS_URL }}
-          NODAROO_FARM_MINUTES: ${{ github.event.inputs.farm_minutes || inputs.farm_minutes || '10' }}
+          NODAROO_FARM_MINUTES: ${{ github.event.inputs.farm_minutes || '10' }}
           NODAROO_NO_EARN_MINUTES: '3'
-        run: python .github/scripts/nodaroo_afk.py
+        run: python nodaroo_afk.py
 
       - name: 提交登录态
         if: always()
@@ -93,9 +83,9 @@ jobs:
             git commit -m "chore(nodarooAFK): 更新登录态 [skip ci]" || echo "无变化"
             # 远端可能被上一棒推过 -> fetch+rebase 重试，避免 non-fast-forward
             for i in 1 2 3; do
-              if git push origin HEAD:main; then break; fi
-              git fetch origin main:main || true
-              git rebase origin/main || git rebase --abort
+              if git push origin HEAD:nodarooAFK; then break; fi
+              git fetch origin nodarooAFK || true
+              git rebase origin/nodarooAFK || git rebase --abort
               sleep 5
             done
           fi
