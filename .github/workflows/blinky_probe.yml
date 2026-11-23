@@ -42,7 +42,7 @@ jobs:
         env:
           BLINKY_USER: ${{ secrets.BLINKY_USER }}
           BLINKY_PASS: ${{ secrets.BLINKY_PASS }}
-          BLINKY_VLESS_URL: ${{ secrets.NODAROO_VLESS_URL }}
+          BLINKY_VLESS_URL: ${{ secrets.BLINKY_VLESS_URL }}
         run: python blinky_probe.py
 
       - name: Upload panel pages
