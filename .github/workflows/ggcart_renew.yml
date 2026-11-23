@@ -3,9 +3,11 @@ name: GGCart Renew
 # GGCart 免费服精准续期（Community Free）。
 # 代码在 ggcart 分支（ggcart_renew.py），workflow 留在 main。
 # 续期只在到期前 48 小时内开放；窗口外脚本只读退出，不发续期请求。
-# 已取消每 6 小时轮询（用户否决）。定时待确认后再加 schedule，目前仅手动触发。
+# 已取消每 6 小时轮询（用户否决）。每天 06:20 UTC 一次（与到期时刻对齐，窗口内会有两次检查）。
 
 on:
+  schedule:
+    - cron: '20 6 * * *'
   workflow_dispatch:
 
 permissions:
