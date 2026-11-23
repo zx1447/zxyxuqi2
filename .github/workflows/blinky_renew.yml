@@ -1,0 +1,48 @@
+name: Blinky Renew
+
+# Baltic Host（blinky.baltichost.online）免费服续期 + 续后启动。
+# 代码在 blinky 分支（blinky_renew.py），workflow 留在 main。
+# 站点只在剩余 ≤3 天时允许续期；不在窗口内时本轮只读、不发写请求。
+# 直连被风控（403/1012）时，用 BLINKY_VLESS_URL 家宽出口兜底。
+
+on:
+  schedule:
+    - cron: '19 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blinky-renew
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: blinky
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install --quiet requests cryptography pysocks
+
+      - name: Install xray（家宽兜底）
+        run: |
+          mkdir -p "$HOME/.xray"
+          curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -qo /tmp/xray.zip -d "$HOME/.xray" && chmod +x "$HOME/.xray/xray"
+
+      - name: Renew
+        env:
+          BLINKY_USER: ${{ secrets.BLINKY_USER }}
+          BLINKY_PASS: ${{ secrets.BLINKY_PASS }}
+          BLINKY_VLESS_URL: ${{ secrets.BLINKY_VLESS_URL }}
+        run: python blinky_renew.py
