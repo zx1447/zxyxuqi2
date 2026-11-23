@@ -1,0 +1,42 @@
+name: GGCart Renew
+
+# GGCart 免费服精准续期（Community Free）。
+# 代码在 ggcart 分支（ggcart_renew.py），workflow 留在 main。
+# 只在到期前 48 小时内点击续期；窗口外本轮只读退出。
+
+on:
+  schedule:
+    - cron: '29 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ggcart-renew
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ggcart
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright + Chromium
+        run: |
+          python -m pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Renew
+        env:
+          GG_EMAIL: ${{ secrets.GG_EMAIL }}
+          GG_PASS: ${{ secrets.GG_PASS }}
+        run: python ggcart_renew.py
