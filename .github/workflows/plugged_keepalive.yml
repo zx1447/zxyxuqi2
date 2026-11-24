@@ -1,8 +1,8 @@
 name: Plugged Keepalive
 
-# plugged.host（mockingbird）+ CraftingHosting 免费服守护：每 6 小时检测一次，停了就开机。
-# GitHub 机房 IP 直连 plugged 面板会被 403，所以经家宽出口（BLINKY_VLESS_URL）的 HTTP 代理访问。
-# 代理起不来时仍然直连（脚本照常跑，可能仍 403）。
+# plugged.host（mockingbird）+ CraftingHosting 免费服守护：每 6 小时检测一次，停了就直接调 API 开机。
+# 直连（不走代理）。注意：GitHub Actions 的 IP 直连 plugged 面板实测会返回 403，
+# 若 403 持续，定时检测会失败，需要换运行位置或加代理。
 
 on:
   schedule:
@@ -33,49 +33,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: 启动家宽 HTTP 代理（xray）
-        env:
-          VLESS_URL: ${{ secrets.BLINKY_VLESS_URL }}
-        run: |
-          set +e
-          if [ -z "$VLESS_URL" ]; then echo "⚠️ 无 VLESS 节点，直连"; exit 0; fi
-          mkdir -p "$HOME/.xray"
-          curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip || { echo "⚠️ 下载 xray 失败，直连"; exit 0; }
-          unzip -qo /tmp/xray.zip -d "$HOME/.xray" && chmod +x "$HOME/.xray/xray"
-          python3 - <<'PY'
-          import json, os, urllib.parse
-          u = urllib.parse.urlparse(os.environ["VLESS_URL"])
-          q = urllib.parse.parse_qs(u.query)
-          outbound = {
-              "protocol": "vless",
-              "settings": {"vnext": [{"address": u.hostname, "port": u.port or 443,
-                                      "users": [{"id": u.username, "encryption": "none"}]}]},
-              "streamSettings": {
-                  "network": q.get("type", ["ws"])[0],
-                  "security": q.get("security", ["tls"])[0],
-                  "tlsSettings": {"serverName": q.get("sni", [u.hostname])[0],
-                                  "fingerprint": q.get("fp", ["chrome"])[0]},
-                  "wsSettings": {"path": q.get("path", ["/"])[0]},
-              },
-          }
-          conf = {"log": {"loglevel": "warning"},
-                  "inbounds": [{"port": 40001, "listen": "127.0.0.1", "protocol": "http"}],
-                  "outbounds": [outbound]}
-          json.dump(conf, open("/tmp/plugged_xray.json", "w"))
-          PY
-          nohup "$HOME/.xray/xray" run -c /tmp/plugged_xray.json > /tmp/plugged_xray.log 2>&1 &
-          sleep 4
-          code=$(curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:40001 https://panel.plugged.host/ || true)
-          echo "代理探测 HTTP $code"
-          if [ -n "$code" ] && [ "$code" != "000" ]; then
-            echo "HTTPS_PROXY=http://127.0.0.1:40001" >> "$GITHUB_ENV"
-            echo "HTTP_PROXY=http://127.0.0.1:40001" >> "$GITHUB_ENV"
-            echo "✅ 家宽代理已就绪"
-          else
-            echo "⚠️ 代理不可用，直连"
-          fi
-          exit 0
 
       - name: 检测并开机
         env:
