@@ -1,21 +1,12 @@
 name: Plugged Keepalive
 
-# plugged.host 免费服守护：检测停止 → 自动开机
-# 目标：mockingbird（嘲鸫）75cd14b3-aaf3-4a1c-a214-dbd787e76d5a  12GB / 50GB
-#       （AU 那台 3cc1d303 用户明确表示不用管，已从守护列表移除）
-#       Minecraft Java · pl2 (Poland) · pl2.plugged.host:34066
-#
-# 设计：每 4 小时定时检测一次，不用长驻循环 + 接力链。
-#   理由：动作很轻（2 个 GET + 偶尔 1 个 POST，几秒钟就跑完），
-#   长驻 330 分钟的 job 只是为了减少调度次数，反而要占一整条
-#   并发槽、还会因为接力链断掉而失效。定时跑更简单也更省配额。
-#
-# cron "17 */4 * * *" = 每 4 小时的第 17 分（UTC），
-#   刻意避开整点，减少 GitHub schedule 高峰排队的概率。
+# plugged.host（mockingbird）+ CraftingHosting 免费服守护：每 6 小时检测一次，停了就开机。
+# GitHub 机房 IP 直连 plugged 面板会被 403，所以经家宽出口（BLINKY_VLESS_URL）的 HTTP 代理访问。
+# 代理起不来时仍然直连（脚本照常跑，可能仍 403）。
 
 on:
   schedule:
-    - cron: '7 */6 * * *'
+    - cron: '13 */6 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -27,13 +18,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: plugged-keepalive-${{ github.ref_name || 'manual' }}
+  group: plugged-keepalive
   cancel-in-progress: false
 
 jobs:
   keepalive:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,13 +34,57 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 检测并拉起
+      - name: 启动家宽 HTTP 代理（xray）
+        env:
+          VLESS_URL: ${{ secrets.BLINKY_VLESS_URL }}
+        run: |
+          set +e
+          if [ -z "$VLESS_URL" ]; then echo "⚠️ 无 VLESS 节点，直连"; exit 0; fi
+          mkdir -p "$HOME/.xray"
+          curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip || { echo "⚠️ 下载 xray 失败，直连"; exit 0; }
+          unzip -qo /tmp/xray.zip -d "$HOME/.xray" && chmod +x "$HOME/.xray/xray"
+          python3 - <<'PY'
+          import json, os, urllib.parse
+          u = urllib.parse.urlparse(os.environ["VLESS_URL"])
+          q = urllib.parse.parse_qs(u.query)
+          outbound = {
+              "protocol": "vless",
+              "settings": {"vnext": [{"address": u.hostname, "port": u.port or 443,
+                                      "users": [{"id": u.username, "encryption": "none"}]}]},
+              "streamSettings": {
+                  "network": q.get("type", ["ws"])[0],
+                  "security": q.get("security", ["tls"])[0],
+                  "tlsSettings": {"serverName": q.get("sni", [u.hostname])[0],
+                                  "fingerprint": q.get("fp", ["chrome"])[0]},
+                  "wsSettings": {"path": q.get("path", ["/"])[0]},
+              },
+          }
+          conf = {"log": {"loglevel": "warning"},
+                  "inbounds": [{"port": 40001, "listen": "127.0.0.1", "protocol": "http"}],
+                  "outbounds": [outbound]}
+          json.dump(conf, open("/tmp/plugged_xray.json", "w"))
+          PY
+          nohup "$HOME/.xray/xray" run -c /tmp/plugged_xray.json > /tmp/plugged_xray.log 2>&1 &
+          sleep 4
+          code=$(curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:40001 https://panel.plugged.host/ || true)
+          echo "代理探测 HTTP $code"
+          if [ -n "$code" ] && [ "$code" != "000" ]; then
+            echo "HTTPS_PROXY=http://127.0.0.1:40001" >> "$GITHUB_ENV"
+            echo "HTTP_PROXY=http://127.0.0.1:40001" >> "$GITHUB_ENV"
+            echo "✅ 家宽代理已就绪"
+          else
+            echo "⚠️ 代理不可用，直连"
+          fi
+          exit 0
+
+      - name: 检测并开机
         env:
           PLUGGED_API_KEY: ${{ secrets.PLUGGED_API_KEY }}
           PLUGGED_SERVERS: '75cd14b3-aaf3-4a1c-a214-dbd787e76d5a'
           POWER_WAIT_SECONDS: '90'
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
             echo "== 干跑模式：只读状态，不开机 =="
             python3 plugged_state.py
             exit 0
