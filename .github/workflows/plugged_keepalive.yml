@@ -24,7 +24,7 @@ concurrency:
 jobs:
   keepalive:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,7 +81,7 @@ jobs:
         env:
           PLUGGED_API_KEY: ${{ secrets.PLUGGED_API_KEY }}
           PLUGGED_SERVERS: '75cd14b3-aaf3-4a1c-a214-dbd787e76d5a'
-          POWER_WAIT_SECONDS: '90'
+          POWER_WAIT_SECONDS: '480'
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           if [ "$DRY_RUN" = "true" ]; then
