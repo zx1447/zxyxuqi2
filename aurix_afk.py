@@ -196,6 +196,7 @@ def pass_gate(ax, tokens):
 
 
 def run_afk(ax, tokens):
+    ax.api("/api/adcheck", "POST", {"blocked": False})
     st, ses = ax.api("/api/afk/start", "POST", {"turnstile": tokens.get("afk", "")})
     if st != 200:
         log(f"AFK start 失败 {st} {str(ses)[:200]}")
@@ -207,6 +208,12 @@ def run_afk(ax, tokens):
     while time.time() - t0 < AFK_MIN * 60:
         time.sleep(30)
         st, d = ax.api("/api/afk/beat", "POST", {"id": sid})
+        if st == 451 and (d.get("adblock") or "ad blocker" in str(d.get("error", ""))):
+            # 站点会周期性复核广告拦截状态，重打一次 adcheck 再继续
+            st_a, _ = ax.api("/api/adcheck", "POST", {"blocked": False})
+            log(f"  beat 451（adblock 复核）→ 重报 adcheck {st_a} 后重试")
+            time.sleep(3)
+            st, d = ax.api("/api/afk/beat", "POST", {"id": sid})
         if st != 200:
             log(f"  beat {st} {str(d)[:160]}")
             break
