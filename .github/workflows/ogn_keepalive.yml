@@ -8,8 +8,9 @@ name: OpenGameNode Keepalive
 
 on:
   schedule:
-    # 会话 4 小时，每 3 小时检查一次，保证下个会话到点前一定有人管
-    - cron: '47 */3 * * *'
+    # 每 6 小时一次（遵守「cron ≥6 小时」的约定）。
+    # 代价：免费会话 4 小时，两轮之间最多空停约 2 小时。
+    - cron: '47 */6 * * *'
   workflow_dispatch:
     inputs:
       dwell_minutes:
