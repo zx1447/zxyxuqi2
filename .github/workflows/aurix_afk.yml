@@ -1,20 +1,23 @@
 name: Aurix AFK + Renew
 
 # Aurix Host（dash.aurix.host/#/earn）。脚本在 aurix 分支。
-# 流程：真浏览器点一下 Turnstile → 纯 HTTP 登录 / 过入场 gate / AFK 挂机 / 到期前续期。
-# 规则：入场 gate 按会话计，每次登录都要重过（30s 计时）；AFK 20 分钟一轮 +8 coins；
-#       续期 20 coins / 14 天，只在剩余 <48h 且余额足够时才发请求。
+# 循环：AFK 挂到本轮结束（默认 5 小时）→ 每个会话 20 分钟 → 休息 44 分钟 → 继续。
+# 每个会话的 afk/start 都要新的 Turnstile token，所以循环内按需开一次浏览器点复选框。
+# 续期：只在剩余 ≤48 小时（最后 2 天）且余额 ≥ 20 coins 时才发请求。
 
 on:
   schedule:
-    # 每天两轮。需求只有 1.43 coins/天，两轮能产 16 coins，余量很大。
-    - cron: '23 */12 * * *'
+    - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
-      mode:
-        description: 'act（挂机+续期）或 probe（只读）'
+      run_minutes:
+        description: '本轮循环总时长（分钟）'
         required: false
-        default: 'act'
+        default: '300'
+      rest_minutes:
+        description: '会话之间休息（分钟）'
+        required: false
+        default: '44'
 
 permissions:
   contents: read
@@ -26,7 +29,7 @@ concurrency:
 jobs:
   afk:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,17 +45,16 @@ jobs:
           python -m playwright install --with-deps chromium
           sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
 
-      - name: 取 Turnstile token（真浏览器点一下）
+      - name: 过 gate + AFK 循环 + 续期
         env:
           AURIX_DISCORD_TOKEN: ${{ secrets.AURIX_DISCORD_TOKEN }}
           AURIX_TOKENS_FILE: ${{ runner.temp }}/aurix_tokens.json
-        run: xvfb-run -a python3 aurix_afk.py --tokens
-
-      - name: 过 gate → AFK → 续期（纯 HTTP）
-        env:
-          AURIX_DISCORD_TOKEN: ${{ secrets.AURIX_DISCORD_TOKEN }}
-          AURIX_TOKENS_FILE: ${{ runner.temp }}/aurix_tokens.json
-          AURIX_AFK_MINUTES: '21'
+          AURIX_RUN_MINUTES: ${{ github.event.inputs.run_minutes || '300' }}
+          AURIX_REST_MINUTES: ${{ github.event.inputs.rest_minutes || '44' }}
           AURIX_RENEW_AT_HOURS: '48'
-          AURIX_MODE: ${{ github.event.inputs.mode || 'act' }}
-        run: python3 aurix_afk.py
+          AURIX_MODE: act
+        run: |
+          # gate token 只在新登录时需要，先产一次
+          xvfb-run -a python3 aurix_afk.py --tokens
+          # 主循环：xvfb 必须包住整个进程，循环里要用 Chromium 产 afk token
+          xvfb-run -a python3 aurix_afk.py
