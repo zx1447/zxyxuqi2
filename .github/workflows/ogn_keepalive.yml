@@ -1,16 +1,21 @@
 name: OpenGameNode Keepalive
 
-# OpenGameNode 面板守护（脚本在 opengamenode 分支）。
-# 有界面 Chromium（Xvfb）登录，Turnstile 由页面自己处理；需要交互式挑战时直接失败。
-# 当前只手动触发。mode=probe 只读；mode=act 才会执行开机/续期。
+# OpenGameNode（panel.opengamenode.com，Calagopus）守护。
+# 脚本在 opengamenode 分支；纯 HTTP，无浏览器、无 Turnstile、无代理。
+# 登录用 Discord OAuth（secrets.OGN_DISCORD_TOKEN）。
+# 免费套餐：会话 4 小时，最多续期 2 次（每次 +4 小时），到点不自动重启。
+# 规则：离线→start；剩余≤10min 且还有额度→extend；额度用完→stop→start 换新会话。
 
 on:
+  schedule:
+    # 会话 4 小时，每 3 小时检查一次，保证下个会话到点前一定有人管
+    - cron: '47 */3 * * *'
   workflow_dispatch:
     inputs:
-      mode:
-        description: 'probe（只读）或 act（开机/续期）'
+      dwell_minutes:
+        description: '本轮驻留分钟数（0=只检查一次）'
         required: false
-        default: 'probe'
+        default: '0'
 
 permissions:
   contents: read
@@ -22,7 +27,7 @@ concurrency:
 jobs:
   keepalive:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,15 +37,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Playwright + Chromium + Xvfb
-        run: |
-          python -m pip install --quiet playwright==1.58.0
-          python -m playwright install --with-deps chromium
-          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
-
-      - name: 登录并检查（真浏览器）
+      - name: 登录并守护
         env:
-          OGN_EMAIL: ${{ secrets.OGN_EMAIL }}
-          OGN_PASSWORD: ${{ secrets.OGN_PASSWORD }}
-          OGN_MODE: ${{ github.event.inputs.mode || 'probe' }}
-        run: xvfb-run -a python ogn_keepalive.py
+          OGN_DISCORD_TOKEN: ${{ secrets.OGN_DISCORD_TOKEN }}
+          OGN_DWELL_MINUTES: ${{ github.event.inputs.dwell_minutes || '0' }}
+          OGN_CHECK_SECONDS: '300'
+        run: python3 ogn_keepalive.py
