@@ -1,0 +1,46 @@
+name: OpenGameNode Keepalive
+
+# OpenGameNode 面板守护（脚本在 opengamenode 分支）。
+# 有界面 Chromium（Xvfb）登录，Turnstile 由页面自己处理；需要交互式挑战时直接失败。
+# 当前只手动触发。mode=probe 只读；mode=act 才会执行开机/续期。
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'probe（只读）或 act（开机/续期）'
+        required: false
+        default: 'probe'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ogn-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: opengamenode
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright + Chromium + Xvfb
+        run: |
+          python -m pip install --quiet playwright==1.58.0
+          python -m playwright install --with-deps chromium
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+
+      - name: 登录并检查（真浏览器）
+        env:
+          OGN_EMAIL: ${{ secrets.OGN_EMAIL }}
+          OGN_PASSWORD: ${{ secrets.OGN_PASSWORD }}
+          OGN_MODE: ${{ github.event.inputs.mode || 'probe' }}
+        run: xvfb-run -a python ogn_keepalive.py
