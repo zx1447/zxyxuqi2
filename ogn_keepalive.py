@@ -1,108 +1,214 @@
 #!/usr/bin/env python3
-"""OpenGameNode 面板（Calagopus）守护：真浏览器登录 → 读服务器与 ogn-session。
+"""OpenGameNode（Calagopus 面板）守护 —— 纯 HTTP，无浏览器、无 Turnstile。
 
-登录：有界面 Chromium（Xvfb），走正常的登录页流程，Turnstile 由页面自己完成。
-      如果页面要求交互式挑战，本脚本直接失败退出，不自动解题。
-之后的所有 API 调用都在页面内用 fetch 发出（同源、带会话 cookie）。
+登录走 Discord OAuth（不需要验证码）：
+  GET  /api/auth/oauth/redirect/<provider>        → 302 discord.com/oauth2/authorize
+  POST discord.com/api/v9/oauth2/authorize?...    → {"location": ".../api/auth/oauth/<uuid>?code=..."}
+  GET  <location>&state=<state>                   → 307 到面板首页，下发 calagopus_session
+  ↑ Discord 不回传 state，必须自己补，否则 400 missing field `state`
 
-模式（环境变量 OGN_MODE）：
-  probe（默认）：只读。打印服务器与 ogn-session 的结构，不做任何写操作。
-  act：离线就 start；会话到期前且有续期额度时才 extend。
+免费套餐（FreeTier）实测参数：
+  session_limit_seconds = 14400 (4h)      extension_seconds = 14400 (4h)
+  max_extensions = 2                      idle_action = stop / idle_seconds = 300
+  会话到点后不会自动重启（clock.action = "session_limit"，state 变 offline）
+
+动作规则：
+  offline / session_limit → power start
+  running 且剩余 ≤ 10 分钟 → ogn-session/extend（只在最后 10 分钟内被接受）
+  续期额度用尽 → stop → start 换新会话
+
+环境变量：
+  OGN_DISCORD_TOKEN   必填，Discord token（登录用）
+  OGN_SERVER_UUIDS    可选，逗号分隔；留空 = 账户下全部服务器
+  OGN_DWELL_MINUTES   可选，默认 0（单次检查后退出）；>0 则驻留巡检
+  OGN_CHECK_SECONDS   驻留间隔，默认 300
 """
 import json
+import http.cookiejar  # noqa: E402  (确保不被同名函数遮蔽)
 import os
 import re
 import sys
 import time
-
-from playwright.sync_api import sync_playwright
+import urllib.error
+import urllib.parse
+import urllib.request
+import http.cookiejar
 
 BASE = "https://panel.opengamenode.com"
-LOGIN = f"{BASE}/auth/login"
-EMAIL = os.environ.get("OGN_EMAIL", "").strip()
-PASSWORD = os.environ.get("OGN_PASSWORD", "")
-MODE = os.environ.get("OGN_MODE", "probe").strip().lower()
-TURNSTILE_WAIT = int(os.environ.get("OGN_TURNSTILE_WAIT", "120"))
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+PROVIDER = os.environ.get("OGN_OAUTH_PROVIDER", "609712d4-1d05-45ad-8ad9-eea05c78941a")
+TOKEN = os.environ.get("OGN_DISCORD_TOKEN", "").strip()
+WANT = [u.strip() for u in os.environ.get("OGN_SERVER_UUIDS", "").split(",") if u.strip()]
+DWELL_MIN = float(os.environ.get("OGN_DWELL_MINUTES", "0") or 0)
+CHECK_SEC = int(os.environ.get("OGN_CHECK_SECONDS", "300") or 300)
+EXTEND_WINDOW_SEC = 600
+STATE_OK = {"running", "starting"}
 
 
-def log(msg):
-    print(msg, flush=True)
+def log(m):
+    print(time.strftime("[%H:%M:%S] ") + m, flush=True)
 
 
-def wait_turnstile(page):
-    """等待页面自己的 Turnstile 产生 token。不点击、不解题。"""
-    deadline = time.time() + TURNSTILE_WAIT
-    while time.time() < deadline:
-        try:
-            tok = page.evaluate(
-                "() => { const i = document.querySelector('input[name=\"cf-turnstile-response\"]');"
-                " return i ? i.value : ''; }")
-        except Exception:  # noqa: BLE001
-            tok = ""
-        if tok:
-            return True
-        page.wait_for_timeout(3000)
-    return False
+class NR(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
 
 
-def login(page):
-    page.goto(LOGIN, wait_until="domcontentloaded", timeout=60000)
-    page.get_by_role("textbox").first.fill(EMAIL)
-    page.get_by_role("button", name=re.compile(r"continue|weiter|continuar", re.I)).first.click()
-    page.wait_for_timeout(2500)
-    if not wait_turnstile(page):
-        raise RuntimeError("Turnstile 没有自动通过（可能需要交互式挑战），停止")
-    pw_box = page.locator("input[type='password']").first
-    pw_box.fill(PASSWORD)
-    page.get_by_role("button", name=re.compile(r"login|sign in|anmelden|log in", re.I)).first.click()
-    page.wait_for_timeout(6000)
-    if "/auth/login" in page.url:
-        raise RuntimeError(f"仍在登录页（url={page.url}），登录未完成")
-    log(f"✅ 登录完成 url={page.url}")
+def do(op, url, method="GET", data=None, headers=None):
+    h = {"User-Agent": UA, "Accept": "application/json"}
+    if headers:
+        h.update(headers)
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, method=method, headers=h)
+    try:
+        r = op.open(req, timeout=30)
+        return r.status, dict(r.headers), r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read().decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        return 0, {}, f"{type(e).__name__}: {e}"
 
 
-def api(page, method, path, body=None):
-    js = """
-    async ([m, p, b]) => {
-      const r = await fetch(p, {method: m, credentials: 'include',
-        headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
-        body: b === null ? undefined : JSON.stringify(b)});
-      const t = await r.text();
-      return {status: r.status, body: t.slice(0, 4000)};
-    }
-    """
-    return page.evaluate(js, [method, path, body])
+def login():
+    if not TOKEN:
+        raise RuntimeError("缺 OGN_DISCORD_TOKEN")
+    cj = http.cookiejar.CookieJar()
+    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj), NR)
+    st, hd, _ = do(op, f"{BASE}/api/auth/oauth/redirect/{PROVIDER}")
+    loc = hd.get("location", "")
+    cid = re.search(r"client_id=(\d+)", loc)
+    state = re.search(r"state=([^&]+)", loc)
+    red = re.search(r"redirect_uri=([^&]+)", loc)
+    if not (cid and state and red):
+        raise RuntimeError(f"OAuth 起始失败 st={st} loc={loc[:120]}")
+    q = urllib.parse.urlencode({
+        "client_id": cid.group(1), "scope": "email identify",
+        "response_type": "code", "redirect_uri": urllib.parse.unquote(red.group(1)),
+    })
+    st, _, body = do(op, f"https://discord.com/api/v9/oauth2/authorize?{q}", "POST",
+                       {"permissions": "0", "authorize": True, "integration_type": 0,
+                        "guild_id": None, "channel_id": None, "captcha_key": None},
+                       {"Authorization": TOKEN, "Content-Type": "application/json",
+                        "Origin": "https://discord.com"})
+    if st != 200:
+        raise RuntimeError(f"Discord authorize {st}: {body[:200]}")
+    cb = json.loads(body)["location"]
+    cb += ("&" if "?" in cb else "?") + "state=" + state.group(1)
+    do(op, cb)
+    if not any(c.name == "calagopus_session" for c in cj):
+        # 307 到首页后再取一次，确保 cookie 落地
+        do(op, BASE + "/")
+    if not any(c.name == "calagopus_session" for c in cj):
+        raise RuntimeError("登录没拿到 calagopus_session（Discord 号是否已绑定该面板？）")
+    log("✅ 登录成功（Discord OAuth，无浏览器）")
+    return op
+
+
+def api(op, path, method="GET", data=None):
+    st, _, body = do(op, BASE + path, method, data,
+                       {"Origin": BASE, "Content-Type": "application/json",
+                        "Referer": BASE + "/"})
+    try:
+        return st, json.loads(body) if body else {}
+    except Exception:  # noqa: BLE001
+        return st, {"_raw": body[:400]}
+
+
+def servers(op):
+    st, d = api(op, "/api/client/servers")
+    if st != 200:
+        raise RuntimeError(f"servers {st}: {str(d)[:200]}")
+    return d.get("servers", {}).get("data", [])
+
+
+def session(op, uuid):
+    st, d = api(op, f"/api/client/servers/{uuid}/ogn-session")
+    return d if st == 200 else None
+
+
+def state_of(op, uuid):
+    st, d = api(op, f"/api/client/servers/{uuid}/resources")
+    return (d.get("resources", {}) or {}).get("state") if st == 200 else None
+
+
+def power(op, uuid, action):
+    st, d = api(op, f"/api/client/servers/{uuid}/power", "POST", {"action": action})
+    log(f"    power {action} → {st} {str(d)[:120]}")
+    return st in (200, 202, 204)
+
+
+def ensure(op, srv):
+    uuid, name = srv["uuid"], srv.get("name")
+    if WANT and uuid not in WANT:
+        return "skip"
+    snap = session(op, uuid) or {}
+    plan = snap.get("plan") or {}
+    clock = snap.get("clock") or {}
+    limit = plan.get("session_limit_seconds") or 0
+    ext_max = plan.get("max_extensions") or 0
+    used = clock.get("extensions_used") or 0
+    elapsed = (clock.get("elapsed_ms") or 0) / 1000.0
+    remaining = limit - elapsed if limit else None
+    st = state_of(op, uuid)
+    log(f"[{name}] 状态={st} 会话={clock.get('status')} 已用={elapsed/60:.1f}min"
+        + (f" 剩余={remaining/60:.1f}min" if remaining is not None else "")
+        + f" 续期={used}/{ext_max}")
+
+    if st not in STATE_OK:
+        if power(op, uuid, "start"):
+            log("    → 已发送开机")
+            return "started"
+        return "fail"
+
+    if remaining is not None and remaining <= EXTEND_WINDOW_SEC:
+        if used < ext_max:
+            e_st, e_d = api(op, f"/api/client/servers/{uuid}/ogn-session/extend", "POST", {})
+            log(f"    extend → {e_st} {str(e_d)[:140]}")
+            if e_st == 200:
+                return "extended"
+        log("    续期额度已用尽 → 换新会话（stop → start）")
+        power(op, uuid, "stop")
+        time.sleep(8)
+        power(op, uuid, "start")
+        return "resession"
+    return "ok"
 
 
 def main():
-    if not EMAIL or not PASSWORD:
-        log("❌ 缺 OGN_EMAIL / OGN_PASSWORD")
+    try:
+        op = login()
+    except Exception as e:  # noqa: BLE001
+        log(f"❌ {e}")
         return 3
-    os.environ.setdefault("DISPLAY", ":99")
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False, args=["--no-sandbox"])
-        context = browser.new_context(locale="en-US", viewport={"width": 1366, "height": 900})
-        page = context.new_page()
+    try:
+        lst = servers(op)
+    except Exception as e:  # noqa: BLE001
+        log(f"❌ {e}")
+        return 3
+    log(f"账户下 {len(lst)} 台服务器")
+
+    deadline = time.time() + max(DWELL_MIN, 0) * 60
+    fails = 0
+    while True:
+        for s in lst:
+            try:
+                r = ensure(op, s)
+                if r == "fail":
+                    fails += 1
+            except Exception as e:  # noqa: BLE001
+                log(f"[{s.get('name')}] ❌ {e}")
+                fails += 1
+        if time.time() + CHECK_SEC > deadline:
+            break
+        time.sleep(CHECK_SEC)
         try:
-            login(page)
-            lst = api(page, "GET", "/api/client/servers")
-            log(f"servers status={lst['status']}")
-            log(lst["body"][:1500])
-            data = json.loads(lst["body"]) if lst["status"] == 200 else {}
-            servers = (data.get("data") or data.get("servers", {}).get("data") or []) if isinstance(data, dict) else []
-            for s in servers:
-                uuid = s.get("uuid")
-                name = s.get("name")
-                st = api(page, "GET", f"/api/client/servers/{uuid}/resources")
-                log(f"[{name}] resources status={st['status']} {st['body'][:600]}")
-                ss = api(page, "GET", f"/api/client/servers/{uuid}/ogn-session")
-                log(f"[{name}] ogn-session status={ss['status']}")
-                log(ss["body"][:2500])
-                if MODE == "act":
-                    log("（act 模式的写操作在看到字段结构后再启用）")
-            return 0
-        finally:
-            browser.close()
+            lst = servers(op)
+        except Exception as e:  # noqa: BLE001
+            log(f"❌ 刷新服务器列表失败：{e}")
+            break
+    log("本轮结束")
+    return 2 if fails else 0
 
 
 if __name__ == "__main__":
