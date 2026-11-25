@@ -45,6 +45,26 @@ POST /api/servers/{uuid}/renew       {} → {balance, expiresAt}
 产出：一轮 20 分钟 = 8 coins；每天 2 轮 = 16 coins/天   → 富余约 11 倍
 ```
 
+## 循环策略（当前配置）
+
+```
+本轮工作流 5 小时（cron 每 6 小时接续）
+  ├─ AFK 会话 1：20 分钟
+  ├─ 休息 44 分钟            ← 你要的间隔
+  ├─ AFK 会话 2：20 分钟
+  ├─ 休息 44 分钟
+  └─ … 直到本轮剩余不足 21 分钟
+每个会话后都查一次续期：剩余 ≤48h（最后 2 天）且余额 ≥20 才真的发
+```
+
+**每个 `afk/start` 都要新的 Turnstile token**（约 5 分钟有效、一次性），
+所以循环里会按需再开一次浏览器点复选框 —— job 里 Chromium 已装好，不需要额外步骤。
+
+一个小发现：站点在会话跑到约 14~15 分钟时会再复核一次广告拦截，
+`beat` 先返回 451、随后服务端直接把会话判 `endReason=adblock`。
+所以实际单会话约 15 分钟 / +4 coins。脚本会自动重报 adcheck 并继续下一轮，
+不会因此中断整轮工作流。
+
 ## 用法
 
 ```
@@ -56,8 +76,9 @@ AURIX_MODE=probe ...                                    # 只读
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
 | `AURIX_DISCORD_TOKEN` | — | 必填 |
-| `AURIX_RENEW_AT_HOURS` | 48 | 剩余多少小时以内才续期 |
-| `AURIX_AFK_MINUTES` | 21 | AFK 最多挂多久 |
+| `AURIX_RUN_MINUTES` | 300 | 本轮循环总时长（分钟） |
+| `AURIX_REST_MINUTES` | 44 | 每个会话之间休息（分钟） |
+| `AURIX_RENEW_AT_HOURS` | 48 | 剩余多少小时以内才续期（最后 2 天） |
 | `AURIX_TOKENS_FILE` | `/tmp/aurix_tokens.json` | token 文件 |
 
-workflow 在 main：`.github/workflows/aurix_afk.yml`，cron `23 */12 * * *`。
+workflow 在 main：`.github/workflows/aurix_afk.yml`，cron `23 */6 * * *`（job 上限 6 小时，一轮 5 小时）。

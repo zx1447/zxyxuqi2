@@ -24,12 +24,18 @@
   · AFK：20 分钟一轮（tickMinutes=5, coinsPerTick=2, maxTicks=4）→ 每次最多 +8 coins
   · 续期：renewalCost 20 coins / 14 天；币不够或未到窗口就不发请求
 
+循环策略（按用户要求）：
+  · AFK 挂到本轮工作流结束（默认 5 小时 = 300 分钟）
+  · 每个会话 20 分钟，之后休息 44 分钟，再开下一个（20 + 44 = 64 分钟一个循环）
+  · 每次 afk/start 都要一个新的 Turnstile token → 循环里按需产（job 里已装 Chromium）
+  · 续期只在服务器剩余 ≤48 小时（=最后 2 天）且余额够时才发请求
+
 环境变量：
   AURIX_DISCORD_TOKEN   必填
-  AURIX_TOKENS_FILE     --tokens 产出的 json 路径，默认 /tmp/aurix_tokens.json
-  AURIX_RENEW_AT_HOURS  剩余多少小时以内才续期，默认 48
-  AURIX_AFK_MINUTES     AFK 最多挂多久，默认 21（跑满一轮）
-  AURIX_MODE            probe = 只读（登录 + 读状态，不写）
+  AURIX_RUN_MINUTES     本轮循环总时长，默认 300
+  AURIX_REST_MINUTES    每个会话之间休息，默认 44
+  AURIX_RENEW_AT_HOURS  剩余多少小时以内才续期，默认 48（=最后 2 天）
+  AURIX_MODE            probe = 只读
 """
 import http.cookiejar
 import json
@@ -47,7 +53,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 TOKEN = os.environ.get("AURIX_DISCORD_TOKEN", "").strip()
 TOKENS_FILE = os.environ.get("AURIX_TOKENS_FILE", "/tmp/aurix_tokens.json")
 RENEW_AT_H = float(os.environ.get("AURIX_RENEW_AT_HOURS", "48") or 48)
-AFK_MIN = float(os.environ.get("AURIX_AFK_MINUTES", "21") or 21)
+RUN_MIN = float(os.environ.get("AURIX_RUN_MINUTES", "300") or 300)
+REST_MIN = float(os.environ.get("AURIX_REST_MINUTES", "44") or 44)
 MODE = os.environ.get("AURIX_MODE", "act").strip().lower()
 SITEKEY = "0x4AAAAAAFzE2Y-C6wXTHOxu"
 
@@ -57,8 +64,8 @@ def log(m):
 
 
 # ------------------------------------------------------------------ Turnstile
-def make_tokens(path):
-    """真浏览器里渲染 Turnstile，点一下复选框，取 gate / afk 两个 token。"""
+def make_tokens(path, actions=("gate", "afk")):
+    """真浏览器里渲染 Turnstile，点一下复选框，取指定 action 的 token。"""
     from playwright.sync_api import sync_playwright
 
     out = {}
@@ -69,7 +76,7 @@ def make_tokens(path):
         pg = ctx.new_page()
         pg.goto(BASE + "/login", wait_until="domcontentloaded", timeout=60000)
         pg.wait_for_timeout(2000)
-        for n, action in enumerate(("gate", "afk")):
+        for n, action in enumerate(actions):
             left, top = 20, 20 + n * 90
             pg.evaluate("""async ([sk, act, left, top]) => {
                 await new Promise((res, rej) => {
@@ -100,8 +107,10 @@ def make_tokens(path):
             out[action] = tok
             log(f"Turnstile {action} ✅ len={len(tok)}")
         b.close()
-    json.dump(out, open(path, "w"))
-    log(f"token 已写入 {path}")
+    if path:
+        json.dump(out, open(path, "w"))
+        log(f"token 已写入 {path}")
+    return out
 
 
 # ------------------------------------------------------------------ HTTP
@@ -195,37 +204,50 @@ def pass_gate(ax, tokens):
     return True
 
 
-def run_afk(ax, tokens):
+def afk_token():
+    """每次 afk/start 都要一个新的 Turnstile token（约 5 分钟有效、一次性）。"""
+    try:
+        return make_tokens(None, ("afk",))["afk"]
+    except Exception as e:  # noqa: BLE001
+        log(f"  Turnstile(afk) 失败：{e}")
+        return ""
+
+
+def run_afk(ax, minutes):
+    """跑一轮 AFK（服务端一轮 20 分钟，最多 +8 coins）。返回 (earned, balance, ended_reason)。"""
     ax.api("/api/adcheck", "POST", {"blocked": False})
-    st, ses = ax.api("/api/afk/start", "POST", {"turnstile": tokens.get("afk", "")})
+    tok = afk_token()
+    if not tok:
+        return 0, None, "no-turnstile"
+    st, ses = ax.api("/api/afk/start", "POST", {"turnstile": tok})
     if st != 200:
         log(f"AFK start 失败 {st} {str(ses)[:200]}")
-        return 0, None
+        return 0, None, f"start-{st}"
     sid = ses["id"]
-    log(f"AFK 开始 · maxTicks={ses.get('maxTicks')} · 每 tick {ses.get('coinsPerTick')} coins")
+    log(f"AFK 开始 · maxTicks={ses.get('maxTicks')} · 每 tick {ses.get('coinsPerTick')} coins"
+        f" · 睡 {minutes:g} 分钟")
     t0 = time.time()
     last = ses
-    while time.time() - t0 < AFK_MIN * 60:
+    got451 = 0
+    while time.time() - t0 < minutes * 60:
         time.sleep(30)
         st, d = ax.api("/api/afk/beat", "POST", {"id": sid})
         if st == 451 and (d.get("adblock") or "ad blocker" in str(d.get("error", ""))):
-            # 站点会周期性复核广告拦截状态，重打一次 adcheck 再继续
-            st_a, _ = ax.api("/api/adcheck", "POST", {"blocked": False})
-            log(f"  beat 451（adblock 复核）→ 重报 adcheck {st_a} 后重试")
+            got451 += 1
+            ax.api("/api/adcheck", "POST", {"blocked": False})
+            log(f"  beat 451（adblock 复核，第 {got451} 次）→ 重报 adcheck 后重试")
             time.sleep(3)
             st, d = ax.api("/api/afk/beat", "POST", {"id": sid})
         if st != 200:
             log(f"  beat {st} {str(d)[:160]}")
-            break
+            return last.get("earned", 0), last.get("balance"), f"beat-{st}"
         last = d
-        if d.get("ticksPaid") != last.get("ticksPaid") or d.get("ended"):
-            pass
         log(f"  beat t+{time.time()-t0:.0f}s · ticks {d.get('ticksPaid')}/{d.get('maxTicks')}"
             f" · +{d.get('earned')} · 余额 {d.get('balance')}")
         if d.get("ended"):
             log(f"  会话结束：{d.get('endReason')}")
             break
-    return last.get("earned", 0), last.get("balance")
+    return last.get("earned", 0), last.get("balance"), last.get("endReason")
 
 
 def handle_renewals(ax, balance):
@@ -288,16 +310,47 @@ def main():
         if not pass_gate(ax, tokens):
             log("❌ gate 没过，本轮结束")
             return 2
-        if MODE != "probe":
-            earned, b2 = run_afk(ax, tokens)
+    except Exception as e:  # noqa: BLE001
+        log(f"❌ gate 异常：{e}")
+        return 2
+
+    if MODE == "probe":
+        handle_renewals(ax, balance)
+        log("probe 完成")
+        return 0
+
+    end_at = time.time() + RUN_MIN * 60
+    session_no = 0
+    total = 0
+    while True:
+        session_no += 1
+        left_min = (end_at - time.time()) / 60
+        if left_min < 21:
+            log(f"剩余 {left_min:.0f} 分钟，不够一个完整会话（20 分钟），收工")
+            break
+        log(f"===== 第 {session_no} 个 AFK 会话（本轮还剩 {left_min:.0f} 分钟）=====")
+        try:
+            earned, b2, reason = run_afk(ax, min(21, left_min))
+            total += earned or 0
             if b2 is not None:
                 balance = b2
-            log(f"AFK 结束 · 本轮 +{earned} · 余额 {balance}")
-        balance = handle_renewals(ax, balance)
-    except Exception as e:  # noqa: BLE001
-        log(f"❌ {type(e).__name__}: {e}")
-        return 2
-    log("本轮完成")
+            log(f"会话 {session_no} 结束 · +{earned} · 余额 {balance} · 原因={reason} · 本轮累计 +{total}")
+        except Exception as e:  # noqa: BLE001
+            log(f"会话 {session_no} 异常：{type(e).__name__}: {e}")
+
+        # 每个会话后都检查一次续期（只在最后 2 天才会真的发）
+        try:
+            balance = handle_renewals(ax, balance)
+        except Exception as e:  # noqa: BLE001
+            log(f"续期检查异常：{e}")
+
+        if time.time() + REST_MIN * 60 > end_at - 21 * 60:
+            log("休息后剩余时间不够再挂一轮，收工")
+            break
+        log(f"休息 {REST_MIN:g} 分钟…")
+        time.sleep(REST_MIN * 60)
+
+    log(f"本轮工作流结束 · {session_no} 个会话 · 累计 +{total} · 余额 {balance}")
     return 0
 
 
