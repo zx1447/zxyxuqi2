@@ -1,54 +1,53 @@
 name: BotHoster Keepalive
-
-# BotHoster（bothoster.top）—— 脚本在 bothoster 分支。
-# 站点按小时计费：Basic 512MB = 1.0000 Coins/h（约 24 coins/天），余额不够就会停机。
-# 本工作流只做三件事，全部以真实读数为准（HTTP 200 不算成功）：
-#   1) 读 /dashboard/servers 的 status / remainingSeconds / expiresAtTimestamp / 余额
-#   2) 不在 running 就 powerAction(start)；remaining < 6h 且余额够 就按小时续期，续完再读一遍核对
-#   3) 余额低于 4 才去 AFK 补币（0.25/60s，日上限 10 coins）
-# 每小时跑一次，单轮短平快；不派发接力、不接 job 链。
-
 on:
   schedule:
-    - cron: '7 * * * *'
+    - cron: '7 */6 * * *'
   workflow_dispatch:
     inputs:
       mode:
-        description: 'service / status / renew / afk'
+        description: 'service / status / renew / afk / probe'
         required: false
         default: 'service'
-      run_minutes:
-        description: 'AFK 补币分钟数（仅 afk/service 用）'
-        required: false
-        default: '50'
-
 permissions:
   contents: read
-
 concurrency:
   group: bothoster-keepalive
   cancel-in-progress: false
-
 jobs:
   keepalive:
     runs-on: ubuntu-24.04
-    timeout-minutes: 70
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           ref: bothoster
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: keepalive
+      - name: 连接订阅代理
+        env:
+          AFK_SUBSCRIPTION_URL: ${{ secrets.AFK_SUBSCRIPTION_URL }}
+        run: |
+          set -eu
+          python bothoster_proxy.py
+          curl -fsSL --max-time 45 -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.11.9/Xray-linux-64.zip
+          echo 'b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82  /tmp/xray.zip' | sha256sum -c -
+          unzip -qo /tmp/xray.zip xray -d /tmp/xray
+          chmod +x /tmp/xray/xray
+          /tmp/xray/xray run -test -config /tmp/afk-proxy.json >/dev/null
+          nohup /tmp/xray/xray run -config /tmp/afk-proxy.json >/tmp/xray.log 2>&1 &
+          ok=0
+          for i in $(seq 1 12); do
+            if curl -fsS --noproxy '' --max-time 8 -x http://127.0.0.1:17890 https://www.cloudflare.com/cdn-cgi/trace >/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" != 1 ]; then echo '::error::订阅代理不可用；不回退直连'; exit 1; fi
+          echo '订阅代理连通'
+      - name: 服务器与 AFK
         env:
           BOTHOSTER_DISCORD_TOKEN: ${{ secrets.BOTHOSTER_DISCORD_TOKEN }}
+          BH_PROXY: http://127.0.0.1:17890
           BH_MODE: ${{ inputs.mode || 'service' }}
-          BH_RUN_MINUTES: ${{ inputs.run_minutes || '50' }}
           BH_SERVER_ID: '13'
-          BH_RENEW_BELOW_HOURS: '6'
-          BH_RENEW_HOURS: '2'
           BH_RESERVE_COINS: '1'
         run: python bothoster.py
