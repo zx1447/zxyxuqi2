@@ -39,7 +39,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 TOKEN = os.environ.get("BOTHOSTER_DISCORD_TOKEN", "").strip()
 MODE = (os.environ.get("BH_MODE", "service") or "service").strip().lower()
 SERVER_ID = int(os.environ.get("BH_SERVER_ID", "13") or 13)
-RUN_MIN = min(10.0, max(0.0, float(os.environ.get("BH_RUN_MINUTES", "10") or 10)))
+RUN_MIN = min(8.0, max(0.0, float(os.environ.get("BH_RUN_MINUTES", "8") or 8)))
 HB_SEC = int(os.environ.get("BH_HEARTBEAT_SECONDS", "60") or 60)
 RENEW_BELOW_H = float(os.environ.get("BH_RENEW_BELOW_HOURS", "6") or 6)
 RENEW_HOURS = int(os.environ.get("BH_RENEW_HOURS", "2") or 2)
@@ -256,25 +256,33 @@ class BH:
         if (self.info.get("earnedToday") or 0) >= (self.info.get("dailyMax") or 10):
             log("今日 AFK 已满，跳过")
             return 0.0
-        t0, got = time.time(), 0.0
-        while time.time() - t0 < minutes * 60:
+        self.afk_failed = False
+        t0, got, misses = time.time(), 0.0, 0
+        while time.time() - t0 + HB_SEC <= minutes * 60:
+            before = float(self.info.get("earnedToday") or 0)
             time.sleep(HB_SEC)
             st, info = self.heartbeat()
-            if st != 200:
-                log(f"  heartbeat {st}")
-                if st in (0, 502, 503, 504):
-                    continue
-                break
-            if not info:
-                continue
-            msg = info.get("lastClaimMessage") or ""
-            if msg.startswith("+"):
-                got += info.get("coinsPerInterval") or 0
-            log(f"  t+{time.time()-t0:.0f}s · 今日 {info.get('earnedToday')}/{info.get('dailyMax')} · {msg}")
-            if "limit" in msg.lower() or "maximum" in msg.lower():
+            message = (info or {}).get("lastClaimMessage") or ""
+            # Livewire 有时重复返回旧成功提示：每次重新读取服务端累计数，
+            # 同时取得新的会话状态；只按累计数的真实增量计算收益。
+            self.load_afk()
+            after = float(self.info.get("earnedToday") or 0)
+            delta = max(0.0, after - before)
+            got += delta
+            log(f"  t+{time.time()-t0:.0f}s · 心跳 HTTP {st} · 今日 {before:g}→{after:g} · 实际 +{delta:g} · {message}")
+            if after >= float(self.info.get("dailyMax") or 10):
                 log("  到日上限，收工")
                 break
+            if delta <= 0:
+                misses += 1
+                if misses >= 2:
+                    log("❌ 连续两次未确认入账，停止并报错")
+                    self.afk_failed = True
+                    break
+            else:
+                misses = 0
         return got
+
 
 
 # -------------------------------------------------------------------- 保活决策
@@ -317,7 +325,7 @@ def main():
         if MODE == "afk":
             got = bh.afk(RUN_MIN)
             log(f"AFK 结束 · 本轮 +{got:.2f} · 今日 {bh.info.get('earnedToday')}/{bh.info.get('dailyMax')}")
-            if got <= 0 and (bh.info.get("earnedToday") or 0) < (bh.info.get("dailyMax") or 10):
+            if (got <= 0 or getattr(bh, "afk_failed", False)) and (bh.info.get("earnedToday") or 0) < (bh.info.get("dailyMax") or 10):
                 log("❌ 未确认 AFK 入账")
                 return 2
             return 0
@@ -325,7 +333,7 @@ def main():
         s = keepalive(bh)
         got = bh.afk(RUN_MIN)
         log(f"AFK 补币 +{got:.2f} · 今日 {bh.info.get('earnedToday')}/{bh.info.get('dailyMax')}")
-        if got <= 0 and (bh.info.get("earnedToday") or 0) < (bh.info.get("dailyMax") or 10):
+        if (got <= 0 or getattr(bh, "afk_failed", False)) and (bh.info.get("earnedToday") or 0) < (bh.info.get("dailyMax") or 10):
             log("❌ 未确认 AFK 入账")
             return 2
         if s["status"] not in ("running", "starting", "installing") or s["suspended"]:
