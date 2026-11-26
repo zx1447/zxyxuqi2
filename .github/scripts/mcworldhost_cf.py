@@ -101,7 +101,11 @@ def open_session(base: str = "https://mcworldhost.de", wait_seconds: int = 90):
     # 可选出站代理。机房 IP 拿不到 Adsterra 广告 → AFK 不计币，需要用住宅/干净出口。
     # 例：MCWH_PROXY=socks5://127.0.0.1:40000
     _proxy = os.environ.get("MCWH_PROXY", "").strip()
-    _ctx_kwargs = {"locale": "en-US", "viewport": {"width": 1366, "height": 900}}
+    # ignore_https_errors：隧道出口偶尔对广告 CDN 吐出不完整证书链（2026-11-26
+    # run 45727838297 实证），导致 invoke.js 加载失败 → 一分不计。站点本身
+    # 走 Cloudflare 证书一直是好的；忽略校验只影响本轮广告加载，可接受。
+    _ctx_kwargs = {"locale": "en-US", "viewport": {"width": 1366, "height": 900},
+                   "ignore_https_errors": True}
     if _proxy:
         _ctx_kwargs["proxy"] = {"server": _proxy}
         print(f"using egress proxy: {_proxy}", flush=True)
