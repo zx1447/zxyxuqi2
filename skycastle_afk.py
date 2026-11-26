@@ -48,6 +48,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+import re
 import os
 import sys
 import time
@@ -229,6 +231,94 @@ def renewals(s):
     return st
 
 
+def server_records(s):
+    code, body = call(s, "GET", "/api/user/billingresourcesnewservers/renewals")
+    if code != 200 or not isinstance(body, dict) or body.get("success") is not True:
+        log(f"❌ 读取续期列表失败: HTTP {code} · {str(body)[:300]}")
+        return None
+    data = body.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("renewals"), list):
+        log("❌ 续期列表格式异常，停止续期操作")
+        return None
+    return data["renewals"]
+
+
+def expiry_utc(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def keep_servers(s):
+    """每台最后48小时内且站点开放时续期；无论是否续期都检查并尝试启动。"""
+    records = server_records(s)
+    if records is None:
+        return False
+    all_ok = True
+    for item in records:
+        if not isinstance(item, dict):
+            log("❌ 续期记录格式异常")
+            all_ok = False
+            continue
+        rid, uid = item.get("id"), item.get("uuidShort")
+        if not str(rid).isdigit() or not re.fullmatch(r"[a-zA-Z0-9-]{1,40}", str(uid or "")):
+            log("❌ 续期记录缺少有效 id / uuidShort")
+            all_ok = False
+            continue
+        name = item.get("server_name") or str(rid)
+        before = expiry_utc(item.get("renews_at"))
+        if before is None:
+            log(f"❌ [{name}] 到期时间无法解析，不自动续期")
+            all_ok = False
+        elif item.get("is_exempt") in (1, True):
+            log(f"ℹ️ [{name}] 免续期")
+        elif item.get("can_renew") is True and (before - datetime.now(timezone.utc)).total_seconds() <= 48 * 3600:
+            log(f"➕ [{name}] 在续期窗口，准备续期 · 原到期 {item.get('renews_at')}")
+            # 禁止对可能已扣币的 POST 自动重试；无论 HTTP 是否成功都复查账期。
+            code, body = call(s, "POST", f"/api/user/billingresourcesnewservers/renewals/{rid}", retries=1)
+            log(f"   续期接口 HTTP {code} · {str(body)[:400]}")
+            current = server_records(s)
+            updated = next((x for x in (current or []) if isinstance(x, dict) and x.get("id") == rid), None)
+            after = expiry_utc(updated.get("renews_at")) if updated else None
+            if after and before and after > before:
+                log(f"✅ [{name}] 到期时间已推进：{item.get('renews_at')} → {updated.get('renews_at')}")
+            else:
+                log(f"❌ [{name}] 未能验证到期时间推进，请查看面板；不自动重试扣费")
+                all_ok = False
+        else:
+            log(f"⏳ [{name}] 不在续期窗口或站点未开放 · 到期 {item.get('renews_at')} · can_renew={item.get('can_renew')}")
+            if item.get("can_renew") is None or (before and before <= datetime.now(timezone.utc)):
+                log(f"❌ [{name}] 续期状态未知或已经到期，需人工检查")
+                all_ok = False
+
+        # 续期失败也不跳过启动；不把 HTTP 200 当成运行成功。
+        path = f"/api/user/servers/{uid}/resources"
+        code, body = call(s, "GET", path, retries=1)
+        state = ((body.get("data") or {}).get("state") if code == 200 and isinstance(body, dict)
+                 and body.get("success") is True else None)
+        log(f"🖥 [{name}] 运行状态={state or '未知'}")
+        if state in ("running", "starting"):
+            continue
+        code, body = call(s, "POST", f"/api/user/servers/{uid}/power/start", retries=1)
+        log(f"🚀 [{name}] start → HTTP {code} · {str(body)[:300]}")
+        verified = False
+        for attempt in range(3):
+            time.sleep(3)
+            rc, result = call(s, "GET", path, retries=1)
+            state = ((result.get("data") or {}).get("state") if rc == 200 and isinstance(result, dict)
+                     and result.get("success") is True else None)
+            log(f"   复查状态={state or '未知'}")
+            if state in ("running", "starting"):
+                verified = True
+                break
+        if not verified:
+            log(f"❌ [{name}] 未确认启动成功")
+            all_ok = False
+    return all_ok
+
+
 def afk_status(s):
     """读配置 + 日限额。返回 data dict 或 {}。"""
     st, body = call(s, "GET", "/api/user/billingafk/status")
@@ -246,7 +336,8 @@ def afk_start(s):
         log('🔍 [dry] POST /api/user/billingafk/start  {"action":"start"}')
         return 0
     st, body = call(s, "POST", "/api/user/billingafk/start", {"action": "start"})
-    return show("▶️  start", st, body)
+    show("▶️  start", st, body)
+    return st if isinstance(body, dict) and body.get("success") is True else -1
 
 
 def afk_work(s):
@@ -285,7 +376,10 @@ def main():
         log("✅ probe 结束")
         return 0
 
-    # 3) 读配置 + 日限额，决定本轮能挂多久
+    # 3) 每台服务器按窗口续期，并检查电源；失败时仍继续 AFK。
+    servers_ok = keep_servers(s)
+
+    # 4) 读配置 + 日限额
     info = afk_status(s)
     if info:
         du = info.get("daily_usage") or {}
@@ -319,11 +413,15 @@ def main():
 
     # 5) 心跳循环
     n = 0
+    afk_ok = True
     deadline = time.time() + (0 if ONCE else MAX_MINUTES * 60)
     while True:
         n += 1
         code, body = afk_work(s)
         if not DRY:
+            if code != 200 or not isinstance(body, dict) or body.get("success") is not True:
+                afk_ok = False
+                log("❌ work 未确认成功，本轮标记失败")
             st["last_work_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             st["last_work_http"] = code
             st["work_count"] = st.get("work_count", 0) + 1
@@ -341,7 +439,10 @@ def main():
             break
         time.sleep(WORK_INTERVAL)
 
-    log(f"✅ 本轮完成，work × {n}")
+    log(f"✅ 本轮挂机完成，work × {n}")
+    if not servers_ok or not afk_ok:
+        log("❌ 服务器续期/启动或挂机心跳存在未确认项，请查看日志")
+        return 2
     return 0
 
 
