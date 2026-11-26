@@ -216,7 +216,13 @@ def selftest(s):
 
 def renewals(s):
     st, body = call(s, "GET", "/api/user/billingresourcesnewservers/renewals")
-    return show("📋 renewals", st, body)
+    show("📋 renewals", st, body)
+    if PROBE and isinstance(body, dict):
+        data = body.get("data") or {}
+        for item in data.get("renewals") or []:
+            print("RENEWAL_DETAIL", json.dumps(item, ensure_ascii=False), flush=True)
+        print("RENEWAL_QUEUE", json.dumps(data.get("queue"), ensure_ascii=False), flush=True)
+    return st
 
 
 def afk_status(s):
