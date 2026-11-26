@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcworldhost_cf import open_session, sign_in, _debug_snapshot  # noqa: E402
@@ -53,30 +54,45 @@ async () => {
     } catch (e) {}
   }
   const pairs = [];
+  const samples = [];
+  let scanned = 0;
   for (const url of urls) {
     let js = '';
     try { js = await (await fetch(url)).text(); } catch (e) { continue; }
+    scanned++;
     for (const m of js.matchAll(/"([0-9a-f]{40})"[^)]{0,200}?"([A-Za-z_$][A-Za-z0-9_$]*Action)"/g)) {
       pairs.push([m[2], m[1]]);
     }
+    let idx = js.indexOf('createServerReference');
+    let n = 0;
+    while (idx >= 0 && n < 3) {
+      samples.push(url.slice(-40) + ' :: ' + js.slice(idx, idx + 200));
+      n++;
+      idx = js.indexOf('createServerReference', idx + 1);
+    }
   }
-  return pairs;
+  return {urls: urls.size, scanned: scanned, pairs: pairs, samples: samples.slice(0, 10)};
 }
 """
 
 
 def discover_action_ids(page):
-    """扫页面 chunk，dump 当前部署全部 server-action (名字, id) 映射，
+    """扫页面 chunk：dump 当前部署全部 server-action (名字, id) 映射与原始样本，
     再按语义模糊匹配签到/购买动作——站点改版改名也不会 404。"""
     try:
-        pairs = page.evaluate(_DISCOVER_JS) or []
+        d = page.evaluate(_DISCOVER_JS) or {}
     except Exception as exc:
         log(f"action-id discovery failed: {type(exc).__name__}; using fallback ids")
-        pairs = []
+        d = {}
+    pairs = d.get("pairs") or []
+    log(f"chunk scan: {d.get('scanned')}/{d.get('urls')} chunks, {len(pairs)} action pairs, {len(d.get('samples') or [])} samples")
+    for s in (d.get("samples") or [])[:6]:
+        log("  sample: " + s[:200].replace("\n", " "))
     found = {}
     for name, aid in pairs:
         found.setdefault(name, aid)
-    log(f"server actions seen ({len(found)}): {', '.join(sorted(found))}")
+    if found:
+        log("server actions seen: " + ", ".join(f"{n}={i[:10]}…" for n, i in sorted(found.items())[:12]))
     ids = dict(FALLBACK_IDS)
     claim = next((n for n in sorted(found) if re.search(r"claim|daily|login", n, re.I)), None)
     spend = next((n for n in sorted(found) if re.search(r"spend|buy|purchase|shop|coin", n, re.I)), None)
@@ -160,77 +176,106 @@ def farm(page, deadline):
     """挂机直到 deadline；连续 NO_EARN_STRIKES 轮没有 +币 就认输返回。
 
     返回 (本轮赚到多少, 退出原因, 期间见过的最大广告加载标记数)。
+    认输前会 dump 第三方请求与 iframe —— 站点改版后靠这个找新的广告机制。
     """
-    try:
-        page.goto(f"{BASE}{AFK_PAGE}", wait_until="domcontentloaded")
-    except Exception as exc:
-        log(f"afk nav failed: {type(exc).__name__}")
-        return 0, "nav-failed", 0
-    page.wait_for_timeout(12000)
-    st0 = afk_state(page)
-    start = st0.get("balance")
-    log(f"AFK watch started: balance={start}, today={st0.get('earnedToday')}/{st0.get('maxEarnPerDay') or DAY_CAP}, ad_markers={st0.get('_ad_markers')}")
-    if start is None:
-        return 0, "no-balance-readout", st0.get("_ad_markers", 0)
-    # 开跑就已经满额，直接收工，不用先耗一个周期去发现
-    if st0.get("dayLimitReached") is True or (st0.get("earnedToday") or 0) >= DAY_CAP:
-        log("今日 500 币已满 -> 本轮不挂机，等明天")
-        return 0, "day-cap", st0.get("_ad_markers", 0)
+    third_party = {}
 
-    last = start
-    strikes = 0
-    max_ad = st0.get("_ad_markers", 0)
-    while time.time() < deadline:
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            break
-        page.wait_for_timeout(min(RELOAD_EVERY, remaining) * 1000)
+    def _on_response(r):
         try:
-            page.reload(wait_until="domcontentloaded")
+            u = urllib.parse.urlsplit(r.url)
+            if u.hostname and "mcworldhost.de" not in u.hostname:
+                third_party[f"{u.hostname}{u.path[:60]}"] = r.status
         except Exception:
             pass
-        if "/dashboard/afk" not in page.url:
-            log("kicked off the AFK route; navigating back")
+
+    page.on("response", _on_response)
+    try:
+        try:
+            page.goto(f"{BASE}{AFK_PAGE}", wait_until="domcontentloaded")
+        except Exception as exc:
+            log(f"afk nav failed: {type(exc).__name__}")
+            return 0, "nav-failed", 0
+        page.wait_for_timeout(12000)
+        st0 = afk_state(page)
+        start = st0.get("balance")
+        log(f"AFK watch started: balance={start}, today={st0.get('earnedToday')}/{st0.get('maxEarnPerDay') or DAY_CAP}, ad_markers={st0.get('_ad_markers')}")
+        if start is None:
+            return 0, "no-balance-readout", st0.get("_ad_markers", 0)
+        # 开跑就已经满额，直接收工，不用先耗一个周期去发现
+        if st0.get("dayLimitReached") is True or (st0.get("earnedToday") or 0) >= DAY_CAP:
+            log("今日 500 币已满 -> 本轮不挂机，等明天")
+            return 0, "day-cap", st0.get("_ad_markers", 0)
+
+        last = start
+        strikes = 0
+        max_ad = st0.get("_ad_markers", 0)
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            page.wait_for_timeout(min(RELOAD_EVERY, remaining) * 1000)
             try:
-                page.goto(f"{BASE}{AFK_PAGE}", wait_until="domcontentloaded")
+                page.reload(wait_until="domcontentloaded")
             except Exception:
+                pass
+            if "/dashboard/afk" not in page.url:
+                log("kicked off the AFK route; navigating back")
+                try:
+                    page.goto(f"{BASE}{AFK_PAGE}", wait_until="domcontentloaded")
+                except Exception:
+                    continue
+
+            st = afk_state(page)
+            max_ad = max(max_ad, st.get("_ad_markers", 0))
+            if st.get("dayLimitReached") is True:
+                log(f"DAILY CAP REACHED: {st.get('earnedToday')}/{st.get('maxEarnPerDay') or DAY_CAP}")
+                log("今日 500 币已满 -> 停手，等明天")
+                return last - start, "day-cap", max_ad
+            today = st.get("earnedToday")
+            b = st.get("balance")
+            if today is not None and today >= DAY_CAP:
+                log(f"DAILY CAP REACHED: {today}/{DAY_CAP} -> 停手")
+                return last - start, "day-cap", max_ad
+
+            if b is None:
+                log("balance readout missing; retry next cycle")
                 continue
-
-        st = afk_state(page)
-        max_ad = max(max_ad, st.get("_ad_markers", 0))
-        if st.get("dayLimitReached") is True:
-            log(f"DAILY CAP REACHED: {st.get('earnedToday')}/{st.get('maxEarnPerDay') or DAY_CAP}")
-            log("今日 500 币已满 -> 停手，等明天")
-            return last - start, "day-cap", max_ad
-        today = st.get("earnedToday")
-        b = st.get("balance")
-        if today is not None and today >= DAY_CAP:
-            log(f"DAILY CAP REACHED: {today}/{DAY_CAP} -> 停手")
-            return last - start, "day-cap", max_ad
-
-        if b is None:
-            log("balance readout missing; retry next cycle")
-            continue
-        if b > last:
-            if strikes:
-                log(f"earning recovered after {strikes} silent cycle(s)")
-            strikes = 0
-            log(f"balance {last} -> {b} (+{b - last})")
-            last = b
-        elif b < last:
-            log(f"balance dropped {last} -> {b} (purchase elsewhere?)")
-            last = b
-            strikes = 0
-        else:
-            strikes += 1
-            log(f"no coins this cycle ({strikes}/{NO_EARN_STRIKES}) - balance {b}, ad_markers={st.get('_ad_markers')}")
-            if strikes >= NO_EARN_STRIKES:
-                log("NO CREDIT -> give up this run, wait for the next scheduled one")
-                _debug_snapshot(page, "afk_nocredit")
-                if max_ad == 0:
-                    log("ad script never appeared in the AFK page (proxy/CDN issue?)")
-                return last - start, "no-credit", max_ad
-    return last - start, "time-up", max_ad
+            if b > last:
+                if strikes:
+                    log(f"earning recovered after {strikes} silent cycle(s)")
+                strikes = 0
+                log(f"balance {last} -> {b} (+{b - last})")
+                last = b
+            elif b < last:
+                log(f"balance dropped {last} -> {b} (purchase elsewhere?)")
+                last = b
+                strikes = 0
+            else:
+                strikes += 1
+                log(f"no coins this cycle ({strikes}/{NO_EARN_STRIKES}) - balance {b}, ad_markers={st.get('_ad_markers')}")
+                if strikes >= NO_EARN_STRIKES:
+                    log("NO CREDIT -> give up this run, wait for the next scheduled one")
+                    _debug_snapshot(page, "afk_nocredit")
+                    log(f"third-party requests during AFK: {json.dumps(third_party)[:800]}")
+                    try:
+                        iframes = page.eval_on_selector_all("iframe", "els=>els.map(e=>e.src).filter(Boolean)")
+                        log(f"iframes on AFK page: {json.dumps(iframes)[:500]}")
+                    except Exception:
+                        pass
+                    try:
+                        banner = page.locator("text=Checking ads").first
+                        log(f"'Checking ads...' still visible: {banner.is_visible()}")
+                    except Exception:
+                        pass
+                    if max_ad == 0:
+                        log("ad script never appeared in the AFK page (proxy/CDN issue?)")
+                    return last - start, "no-credit", max_ad
+        return last - start, "time-up", max_ad
+    finally:
+        try:
+            page.remove_listener("response", _on_response)
+        except Exception:
+            pass
 
 
 def afk_state(page):
@@ -283,6 +328,25 @@ def afk_counters(page):
 ALLOWED_ITEMS = {"runtime_7d", "runtime_24h"}
 
 
+def claim_daily_by_click(page) -> bool:
+    """点 coins 页的签到按钮（页面自己的 JS 知道当前部署的 action id，
+    比 POST 硬编码 id 耐改版）。返回是否点到了按钮。"""
+    try:
+        page.goto(f"{BASE}{COINS_PAGE}", wait_until="domcontentloaded")
+        page.wait_for_timeout(4000)
+        btn = page.get_by_role("button", name=re.compile(r"claim|签到|reward|daily", re.I)).first
+        if btn.count() == 0:
+            log("no claim button visible on coins page")
+            return False
+        btn.click(timeout=5000)
+        log("claim button clicked, waiting for state change...")
+        page.wait_for_timeout(4000)
+        return True
+    except Exception as exc:
+        log(f"claim click failed: {type(exc).__name__}: {str(exc)[:140]}")
+        return False
+
+
 def buy(page, item_id, ids, cost_cache=None):
     """Buy one runtime extension. Refuses anything outside ALLOWED_ITEMS."""
     if item_id not in ALLOWED_ITEMS:
@@ -325,14 +389,14 @@ def main():
         if st.get("claimed") is True:
             log("daily login already claimed today.")
         else:
-            res = call_action(page, COINS_PAGE, ids["claimDailyLoginAction"], [])
-            body = res.get("body", "")
-            if res.get("status") == 200 and '"claimedToday":true' in body.replace('\\"', '"'):
-                log(f"daily login claimed (reward was {st.get('daily_reward')}).")
-            elif res.get("status") == 200:
-                log("daily claim returned 200; rechecking account state, not assuming success.")
-            else:
-                log(f"daily claim failed: HTTP {res.get('status')} body={(res.get('body') or '')[:160]!r}")
+            clicked = claim_daily_by_click(page)
+            if not clicked:
+                log("falling back to POST claim...")
+                res = call_action(page, COINS_PAGE, ids["claimDailyLoginAction"], [])
+                if res.get("status") == 200:
+                    log("claim POST returned 200 (verifying via state).")
+                else:
+                    log(f"daily claim failed: HTTP {res.get('status')} body={(res.get('body') or '')[:160]!r}")
             page.reload(wait_until="domcontentloaded")
             st = read_state(page)
 
