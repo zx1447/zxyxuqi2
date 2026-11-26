@@ -36,15 +36,15 @@ FALLBACK_IDS = {
     "claimDailyLoginAction": "00db7bd04a2bd65c362187785705f27fc230af9819",
     "spendCoinsAction": "40a6b10028adbf9c211c7386e979767ebdfd1afdee",
 }
-ACTION_NAMES = ("claimDailyLoginAction", "spendCoinsAction")
+ACTION_NAMES = ("claimDailyLoginAction", "spendCoinsAction")  # 语义键，供 ids dict 引用
 
 _DISCOVER_JS = """
-async (names) => {
+async () => {
   const urls = new Set();
   for (const u of performance.getEntriesByType('resource')) {
     if (u.name && u.name.includes('/_next/')) urls.add(u.name);
   }
-  for (const path of ['/dashboard/coins', '/dashboard/shop']) {
+  for (const path of ['/dashboard/coins', '/dashboard/shop', '/dashboard/afk']) {
     try {
       const html = await (await fetch(path)).text();
       for (const m of html.matchAll(/src="([^"]*\\/_next\\/[^"]+\\.js[^"]*)"/g)) {
@@ -52,34 +52,40 @@ async (names) => {
       }
     } catch (e) {}
   }
-  const found = {};
+  const pairs = [];
   for (const url of urls) {
     let js = '';
     try { js = await (await fetch(url)).text(); } catch (e) { continue; }
-    for (const name of names) {
-      if (found[name]) continue;
-      const idx = js.indexOf('"' + name + '"');
-      if (idx < 0) continue;
-      const win = js.slice(Math.max(0, idx - 220), idx);
-      const ids = win.match(/[0-9a-f]{40}/g);
-      if (ids && ids.length) found[name] = ids[ids.length - 1];
+    for (const m of js.matchAll(/"([0-9a-f]{40})"[^)]{0,200}?"([A-Za-z_$][A-Za-z0-9_$]*Action)"/g)) {
+      pairs.push([m[2], m[1]]);
     }
-    if (names.every(n => found[n])) break;
   }
-  return found;
+  return pairs;
 }
 """
 
 
 def discover_action_ids(page):
-    """在页面里扫已加载/引用的 Next.js chunk，找出当前部署的 action id。"""
+    """扫页面 chunk，dump 当前部署全部 server-action (名字, id) 映射，
+    再按语义模糊匹配签到/购买动作——站点改版改名也不会 404。"""
     try:
-        found = page.evaluate(_DISCOVER_JS, list(ACTION_NAMES)) or {}
+        pairs = page.evaluate(_DISCOVER_JS) or []
     except Exception as exc:
         log(f"action-id discovery failed: {type(exc).__name__}; using fallback ids")
-        found = {}
-    ids = {n: found.get(n) or FALLBACK_IDS.get(n, "") for n in ACTION_NAMES}
-    log(f"action ids discovered: {len(found)}/{len(ACTION_NAMES)}")
+        pairs = []
+    found = {}
+    for name, aid in pairs:
+        found.setdefault(name, aid)
+    log(f"server actions seen ({len(found)}): {', '.join(sorted(found))}")
+    ids = dict(FALLBACK_IDS)
+    claim = next((n for n in sorted(found) if re.search(r"claim|daily|login", n, re.I)), None)
+    spend = next((n for n in sorted(found) if re.search(r"spend|buy|purchase|shop|coin", n, re.I)), None)
+    if claim:
+        ids["claimDailyLoginAction"] = found[claim]
+        log(f"claim action -> {claim} = {found[claim][:12]}…")
+    if spend:
+        ids["spendCoinsAction"] = found[spend]
+        log(f"spend action -> {spend} = {found[spend][:12]}…")
     return ids
 
 
@@ -326,7 +332,7 @@ def main():
             elif res.get("status") == 200:
                 log("daily claim returned 200; rechecking account state, not assuming success.")
             else:
-                log(f"daily claim failed: HTTP {res.get('status')}")
+                log(f"daily claim failed: HTTP {res.get('status')} body={(res.get('body') or '')[:160]!r}")
             page.reload(wait_until="domcontentloaded")
             st = read_state(page)
 
