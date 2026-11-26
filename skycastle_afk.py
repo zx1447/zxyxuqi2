@@ -221,6 +221,10 @@ def renewals(s):
         data = body.get("data") or {}
         for item in data.get("renewals") or []:
             print("RENEWAL_DETAIL", json.dumps(item, ensure_ascii=False), flush=True)
+            uid = item.get("uuidShort")
+            if uid:
+                rc, resources = call(s, "GET", "/api/user/servers/" + str(uid) + "/resources", retries=1)
+                print("SERVER_RESOURCES", rc, json.dumps(resources, ensure_ascii=False), flush=True)
         print("RENEWAL_QUEUE", json.dumps(data.get("queue"), ensure_ascii=False), flush=True)
     return st
 
