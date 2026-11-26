@@ -1,17 +1,7 @@
-"""MCWorldHost 每日流水线：签到 → （够 500 就续 7 天）→ 挂 AFK 刷币。
+"""MCWorldHost 每日签到与续期检查；AFK 默认暂停。
 
-三条硬规则（2026-11 定）：
-  1. 只买「运行时间延长」—— runtime_7d / runtime_24h，其它商品一律拒单（ALLOWED_ITEMS）。
-  2. 单次挂机拉满 6 小时（GitHub job 上限 360 分钟，故设 340 分钟留装环境余量）。
-  3. 连续 2 轮（约 8 分钟）没有 +币 就判定「拿不到积分」，立刻收工等下一轮，
-     不再无效空转。
-
-为什么要代理出口：GitHub runner 是机房 IP，Adsterra 直接 403，AFK 页的广告探测
-拿不到 ok → 服务端一分不计（诊断跑 43673423044 实证：浏览器开满 6 分钟 285→285）。
-现走订阅的 VLESS 隧道出口（mcwh_subscription_proxy.py 生成 xray 配置），
-此前 WARP 出口实测每分钟稳定 +3。
-
-币是「真实广告展示」换来的，本脚本绝不伪造 ad-status postMessage。
+恢复 AFK 前需由用户明确同意。签到通过刷新后的 claimed 状态核验；
+续期只允许 runtime_7d 和 runtime_24h，沿用现有判断，不伪造广告状态。
 """
 import json
 import os
@@ -45,7 +35,7 @@ async () => {
   for (const u of performance.getEntriesByType('resource')) {
     if (u.name && u.name.includes('/_next/')) urls.add(u.name);
   }
-  for (const path of ['/dashboard/coins', '/dashboard/shop', '/dashboard/afk']) {
+  for (const path of ['/dashboard/coins', '/dashboard/shop']) {
     try {
       const html = await (await fetch(path)).text();
       for (const m of html.matchAll(/src="([^"]*\\/_next\\/[^"]+\\.js[^"]*)"/g)) {
@@ -366,6 +356,7 @@ def main():
     password = os.environ.get("MCWH_PASSWORD", "")
     max_minutes = min(8.0, max(0.0, float(os.environ.get("MCWH_AFK_MAX_MINUTES", DEFAULT_MAX_MINUTES))))
     buy_at = int(os.environ.get("MCWH_BUY_7D_AT", "500"))
+    afk_enabled = os.environ.get("MCWH_AFK_ENABLED", "false").strip().lower() in ("1", "true", "yes")
     if not email or not password:
         log("Missing MCWH_EMAIL / MCWH_PASSWORD.")
         return 2
@@ -400,6 +391,11 @@ def main():
             page.reload(wait_until="domcontentloaded")
             st = read_state(page)
 
+        claim_verified = st.get("claimed") is True
+        if claim_verified:
+            log("✅ 今日签到已核验")
+        else:
+            log("::error::无法确认今日签到成功")
         balance = st.get("balance", before)
         log(f"balance after daily: {balance}")
 
@@ -452,21 +448,25 @@ def main():
             if buy_at - balance > 0:
                 log("::warning::余额不足 500，未续期；运行时间耗尽后服务器会被停用")
 
-        # ---------- 3. farm AFK ----------
-        deadline = time.time() + max_minutes * 60
-        earned, why, max_ad = farm(page, deadline)
+        # ---------- 3. AFK 默认暂停，签到和续期检查照常 ----------
+        afk_ok = True
+        if afk_enabled:
+            deadline = time.time() + max_minutes * 60
+            earned, why, max_ad = farm(page, deadline)
+            log(f"AFK earned this run: +{earned} (exit: {why}, ad markers seen: {max_ad})")
+            if why != "day-cap" and (why in ("nav-failed", "no-balance-readout", "no-credit") or earned <= 0):
+                log(f"::error::AFK did not show verified credit growth (ad markers seen in page: {max_ad})")
+                afk_ok = False
+        else:
+            log("⏸ AFK 已暂停，本轮不进入挂机页")
 
         final = read_state(page)
         log("================ REPORT ================")
         log(f"balance {before} -> {final.get('balance')}")
         log(f"daily claimed: {final.get('claimed')}")
         log(f"7d runtime bought this run: {bought or 'no'}")
-        log(f"AFK earned this run: +{earned} (exit: {why}, ad markers seen: {max_ad})")
         log(f"runtime expires: {final.get('runtime_expires')}")
-        if why != "day-cap" and (why in ("nav-failed", "no-balance-readout", "no-credit") or earned <= 0):
-            log(f"::error::AFK did not show verified credit growth (ad markers seen in page: {max_ad})")
-            return 2
-        return 0
+        return 0 if claim_verified and afk_ok else 2
     finally:
         try:
             browser.close()
