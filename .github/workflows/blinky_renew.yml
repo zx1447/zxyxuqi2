@@ -2,7 +2,8 @@ name: Blinky Renew
 
 # Baltic Host（blinky.baltichost.online）免费服续期 + 续后启动。
 # 代码在 blinky 分支（blinky_renew.py），workflow 留在 main。
-# 站点只在剩余 ≤3 天时允许续期；不在窗口内时本轮只读、不发写请求。
+# 常规每 4 天访问一次，站点允许就续；接近最后 4 天或上次失败时每 6 小时兜底。
+# 6 小时 cron 仅作唤醒，未到检查时间时不登录、不访问站点；不自派发。
 # 直连被风控（403/1012）时，用 BLINKY_VLESS_URL 家宽出口兜底。
 
 on:
@@ -11,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: blinky-renew
@@ -45,4 +46,18 @@ jobs:
           BLINKY_USER: ${{ secrets.BLINKY_USER }}
           BLINKY_PASS: ${{ secrets.BLINKY_PASS }}
           BLINKY_VLESS_URL: ${{ secrets.BLINKY_VLESS_URL }}
+          BLINKY_SCHEDULED: ${{ github.event_name == 'schedule' && '1' || '0' }}
         run: python blinky_renew.py
+
+      - name: 保存检查状态
+        if: always()
+        run: |
+          if [ -f blinky_state.json ]; then
+            git config user.name 'zx-build'
+            git config user.email 'build@zx.local'
+            git add -f blinky_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m 'state: blinky renewal check [skip ci]'
+              git push origin HEAD:blinky
+            fi
+          fi
