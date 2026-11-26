@@ -11,7 +11,7 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,9 +24,7 @@ jobs:
           python -m pip install --quiet playwright==1.58.0
           python -m playwright install --with-deps chromium
           sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
-      # 出口必须是「干净 IP」：Adsterra 对机房 IP 拒发广告（AFK 页卡在
-      # Checking ads...，两个广告位空白，一分不计 —— run 45733243435 截图实证）。
-      # WARP 出口历史实证 +3 币/分钟；订阅隧道出口（VPS）已被拉黑，仅作兜底保登录。
+      # 保留既有 WARP / 订阅后备出口用于登录与签到；本轮 AFK 已暂停。
       - name: Start WARP egress
         run: |
           set -e
@@ -81,19 +79,13 @@ jobs:
           done
           if [ "$ok" != 1 ]; then echo '::error::WARP 与订阅隧道都不可用；不回退直连'; exit 1; fi
           echo '订阅隧道连通（注意：该出口可能拿不到广告积分，仅保登录/签到）'
-      - name: Adsterra reachability (informational)
-        run: |
-          if [ "${WARP_OK:-0}" = "1" ]; then P="-x socks5h://127.0.0.1:40000"; else P="-x http://127.0.0.1:17890"; fi
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 $P -A "$UA" -H "Referer: https://mcworldhost.de/" \
-            "https://www.highperformanceformat.com/d9ea19489d57516b42e85c76756ada44/invoke.js" || echo 000)
-          echo "Adsterra probe: HTTP $code（curl 探测仅供参考，反作弊可能 403/返回空脚本；最终以真实浏览器积分为准）"
-      - name: Daily claim + AFK + renew
+      - name: Daily claim + renew (AFK paused)
         env:
           MCWH_EMAIL: ${{ secrets.MCWH_EMAIL }}
           MCWH_PASSWORD: ${{ secrets.MCWH_PASSWORD }}
           MCWH_PROXY: ${{ env.WARP_OK == '1' && 'socks5://127.0.0.1:40000' || 'socks5://127.0.0.1:17891' }}
           MCWH_BUY_7D_AT: '500'
+          MCWH_AFK_ENABLED: 'false'
         run: python .github/scripts/mcworldhost_daily.py
       - name: Upload snapshots
         if: always()
