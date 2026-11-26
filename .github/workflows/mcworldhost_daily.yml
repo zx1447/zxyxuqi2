@@ -11,7 +11,7 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,13 +37,21 @@ jobs:
           /tmp/xray/xray run -test -config /tmp/afk-proxy.json >/dev/null
           nohup /tmp/xray/xray run -config /tmp/afk-proxy.json >/tmp/xray.log 2>&1 &
           ok=0
-          for i in $(seq 1 12); do
+          for i in $(seq 1 20); do
             if curl -fsS --noproxy '' --max-time 8 -x http://127.0.0.1:17890 https://www.cloudflare.com/cdn-cgi/trace >/dev/null; then ok=1; break; fi
-            sleep 1
+            sleep 2
           done
           if [ "$ok" != 1 ]; then echo '::error::订阅代理不可用；不回退直连'; exit 1; fi
           echo '订阅代理连通'
-          if ! curl -fsS --noproxy '' --max-time 20 -x http://127.0.0.1:17890 -o /dev/null 'https://www.highperformanceformat.com/d9ea19489d57516b42e85c76756ada44/invoke.js'; then
+          # 隧道刚起来时广告 CDN 可能暂时吐坏证书链（run 45727838297 实证），
+          # 重试几次再下结论，别拿启动后 1 秒的一次性探测当准。
+          adok=0
+          for i in 1 2 3 4 5; do
+            if curl -fsS --noproxy '' --max-time 20 -x http://127.0.0.1:17890 -o /dev/null 'https://www.highperformanceformat.com/d9ea19489d57516b42e85c76756ada44/invoke.js'; then adok=1; break; fi
+            echo "广告域名检查第 $i 次失败，8 秒后重试"
+            sleep 8
+          done
+          if [ "$adok" != 1 ]; then
             echo '::warning::广告连接或证书校验失败，挂机可能不产币；仍用真实浏览器验证'
           fi
       - name: Daily claim + AFK + renew
