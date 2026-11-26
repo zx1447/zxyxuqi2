@@ -1,15 +1,15 @@
 {
-  "afk_credits": 19266,
+  "afk_credits": 19270,
   "cap_detected_at": "2026-11-20 07:49:36",
-  "claimed_today": 8,
-  "credits": 19316,
+  "claimed_today": 4,
+  "credits": 19320,
   "daily_limit": 1000,
-  "last_claim_time": "2026-11-26 02:52:40",
-  "last_claim_timestamp": 1795632760,
+  "last_claim_time": "2026-11-26 16:52:40",
+  "last_claim_timestamp": 1795683160,
   "last_error": "HTTPSConnectionPool(host='app.lemonhost.me', port=443): Max retries exceeded with url: /api/client/account (Caused by ConnectTimeoutError(<HTTPSConnection(host='app.lemonhost.me', port=443) at 0x7cfe24e4be30>, 'Connection to app.lemonhost.me timed out. (connect timeout=30)'))",
   "last_status": "cooldown",
   "session_id": "afk-b5aa092e19a946a2886051597cdba532",
-  "total_claims": 18299,
-  "updated_at": "2026-11-26 02:53:09",
+  "total_claims": 18303,
+  "updated_at": "2026-11-26 16:53:10",
   "username": "alejandro"
 }
