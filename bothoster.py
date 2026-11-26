@@ -39,7 +39,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 TOKEN = os.environ.get("BOTHOSTER_DISCORD_TOKEN", "").strip()
 MODE = (os.environ.get("BH_MODE", "service") or "service").strip().lower()
 SERVER_ID = int(os.environ.get("BH_SERVER_ID", "13") or 13)
-RUN_MIN = float(os.environ.get("BH_RUN_MINUTES", "50") or 50)
+RUN_MIN = min(10.0, max(0.0, float(os.environ.get("BH_RUN_MINUTES", "10") or 10)))
 HB_SEC = int(os.environ.get("BH_HEARTBEAT_SECONDS", "60") or 60)
 RENEW_BELOW_H = float(os.environ.get("BH_RENEW_BELOW_HOURS", "6") or 6)
 RENEW_HOURS = int(os.environ.get("BH_RENEW_HOURS", "2") or 2)
@@ -59,7 +59,12 @@ class NR(urllib.request.HTTPRedirectHandler):
 class BH:
     def __init__(self):
         self.cj = http.cookiejar.CookieJar()
-        self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj), NR)
+        proxy = os.environ.get("BH_PROXY", "").strip()
+        handlers = [urllib.request.HTTPCookieProcessor(self.cj), NR]
+        if proxy:
+            handlers.insert(0, urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+            log("使用订阅代理")
+        self.op = urllib.request.build_opener(*handlers)
         self.csrf = None
         self.lw_url = None
         self.snapshot = None
@@ -274,30 +279,22 @@ class BH:
 
 # -------------------------------------------------------------------- 保活决策
 def keepalive(bh):
-    """以真实读数为准：先读状态 → 判定续期 / 启动 / 什么都不做。"""
+    """服务端仅允许对挂起服务器续期；尽力续期后，无论成功与否都尝试启动。"""
     s = bh.status()
-    log(f"服务器 #{s['serverId']} · {s['status']} · 剩余 {s['remaining_s']}s "
-        f"({(s['remaining_s'] or 0)/3600:.2f}h) · 余额 {s['balance']} · "
-        f"lowRunway={s['isLowRunway']}")
-    if s["status"] not in ("running", "installing") or s["suspended"]:
-        log("  未在运行 → 拉起来")
+    log(f"服务器 #{s['serverId']} · {s['status']} · suspended={s['suspended']} · 余额 {s['balance']}")
+    if s["suspended"]:
+        bal = float(s["balance"] or 0)
+        if bal >= 1 + RESERVE:
+            log("服务器已挂起，尝试续期")
+            bh.renew(s["serverId"])
+            s = bh.status()
+        else:
+            log("⚠️ 余额不足以续期，仍尝试启动")
+    if s["status"] not in ("running", "starting", "installing") or s["suspended"]:
         bh.power("start", s["serverId"])
         time.sleep(8)
         s = bh.status()
-        log(f"  启动后：{s['status']} · 剩余 {(s['remaining_s'] or 0)/3600:.2f}h")
-
-    hours = (s["remaining_s"] or 0) / 3600
-    bal = float(s["balance"] or 0)
-    if hours < RENEW_BELOW_H:
-        if bal >= 1 + RESERVE:
-            log(f"  剩余 {hours:.2f}h < {RENEW_BELOW_H}h 且余额 {bal} ≥ {1+RESERVE} → 续期")
-            bh.renew(s["serverId"])
-            s = bh.status()
-            log(f"  续后：剩余 {(s['remaining_s'] or 0)/3600:.2f}h · 余额 {s['balance']}")
-        else:
-            log(f"  ⚠️ 剩余 {hours:.2f}h 但余额 {bal} 不够续期 → 需要先赚币（AFK / Work.ink）")
-    else:
-        log(f"  剩余 {hours:.2f}h ≥ {RENEW_BELOW_H}h，暂不续")
+        log(f"启动后：{s['status']} · suspended={s['suspended']}")
     return s
 
 
@@ -306,8 +303,9 @@ def main():
     try:
         bh.login()
         if MODE == "probe":
-            print(json.dumps({"server": bh.status(), "afk": bh.load_afk()},
-                             indent=1, ensure_ascii=False))
+            info = bh.load_afk()
+            safe = {k: info.get(k) for k in ("earnedToday", "dailyMax", "coinsPerInterval", "intervalSeconds")}
+            print(json.dumps({"server": bh.status(), "afk": safe}, indent=1, ensure_ascii=False))
             return 0
         if MODE == "status":
             print(json.dumps(bh.status(), indent=1, ensure_ascii=False))
@@ -319,13 +317,22 @@ def main():
         if MODE == "afk":
             got = bh.afk(RUN_MIN)
             log(f"AFK 结束 · 本轮 +{got:.2f} · 今日 {bh.info.get('earnedToday')}/{bh.info.get('dailyMax')}")
+            if got <= 0 and (bh.info.get("earnedToday") or 0) < (bh.info.get("dailyMax") or 10):
+                log("❌ 未确认 AFK 入账")
+                return 2
             return 0
-        # service：先续期/启动，再挂机补币
+        # 先续期/启动；只要未达到日限额，就按用户要求挂机，不按余额跳过。
         s = keepalive(bh)
-        if float(s["balance"] or 0) < 3 + RESERVE:
-            got = bh.afk(RUN_MIN)
-            log(f"AFK 补币 +{got:.2f} · 余额 {bh.balance}")
-            keepalive(bh)
+        got = bh.afk(RUN_MIN)
+        log(f"AFK 补币 +{got:.2f} · 今日 {bh.info.get('earnedToday')}/{bh.info.get('dailyMax')}")
+        if got <= 0 and (bh.info.get("earnedToday") or 0) < (bh.info.get("dailyMax") or 10):
+            log("❌ 未确认 AFK 入账")
+            return 2
+        if s["status"] not in ("running", "starting", "installing") or s["suspended"]:
+            s = keepalive(bh)
+        if s["status"] not in ("running", "starting", "installing") or s["suspended"]:
+            log("❌ 无法确认服务器已启动")
+            return 2
         return 0
     except Exception as e:  # noqa: BLE001
         log(f"❌ {e}")
