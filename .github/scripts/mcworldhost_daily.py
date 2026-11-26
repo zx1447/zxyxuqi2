@@ -25,7 +25,7 @@ BASE = "https://mcworldhost.de"
 COINS_PAGE = "/dashboard/coins"
 AFK_PAGE = "/dashboard/afk"
 RELOAD_EVERY = 240      # 站点要求每 5 分钟刷新一次以重新 arm
-DEFAULT_MAX_MINUTES = 340
+DEFAULT_MAX_MINUTES = 8
 DAY_CAP = 500
 
 # Next.js server-action ids (from the page chunks, 2026-11)
@@ -125,7 +125,10 @@ def farm(page, deadline):
     last = start
     strikes = 0
     while time.time() < deadline:
-        page.wait_for_timeout(RELOAD_EVERY * 1000)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        page.wait_for_timeout(min(RELOAD_EVERY, remaining) * 1000)
         try:
             page.reload(wait_until="domcontentloaded")
         except Exception:
@@ -234,7 +237,7 @@ def buy(page, item_id, cost_cache=None):
 def main():
     email = os.environ.get("MCWH_EMAIL", "").strip()
     password = os.environ.get("MCWH_PASSWORD", "")
-    max_minutes = float(os.environ.get("MCWH_AFK_MAX_MINUTES", DEFAULT_MAX_MINUTES))
+    max_minutes = min(8.0, max(0.0, float(os.environ.get("MCWH_AFK_MAX_MINUTES", DEFAULT_MAX_MINUTES))))
     buy_at = int(os.environ.get("MCWH_BUY_7D_AT", "500"))
     if not email or not password:
         log("Missing MCWH_EMAIL / MCWH_PASSWORD.")
@@ -263,7 +266,7 @@ def main():
             if res.get("status") == 200 and '"claimedToday":true' in body.replace('\\"', '"'):
                 log(f"daily login claimed (reward was {st.get('daily_reward')}).")
             elif res.get("status") == 200:
-                log("daily claim returned 200 (assumed ok).")
+                log("daily claim returned 200; rechecking account state, not assuming success.")
             else:
                 log(f"daily claim failed: HTTP {res.get('status')}")
             page.reload(wait_until="domcontentloaded")
@@ -274,7 +277,13 @@ def main():
 
         # ---------- 2. renew at 500 ----------
         bought = None
-        if balance >= buy_at and not st.get("runtime_7d_locked"):
+        import datetime as _dt
+        try:
+            expiry = _dt.datetime.fromisoformat(st["runtime_expires"].replace("Z", "+00:00"))
+            hours_to_expiry = (expiry - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 3600
+        except (KeyError, ValueError, TypeError):
+            hours_to_expiry = None
+        if balance >= buy_at and st.get("runtime_7d_locked") is False and hours_to_expiry is not None and hours_to_expiry <= 48:
             log(f"balance {balance} >= {buy_at}: buying 7 days extra runtime...")
             ok, bal = buy(page, "runtime_7d")
             if ok:
@@ -283,6 +292,8 @@ def main():
             page.reload(wait_until="domcontentloaded")
             st = read_state(page)
             balance = st.get("balance", balance)
+        elif balance >= buy_at:
+            log(f"7d renewal skipped: expiry hours={hours_to_expiry}, locked={st.get('runtime_7d_locked')}; only renew within 48h when unlocked.")
         elif st.get("runtime_7d_locked"):
             log("a 7d runtime boost is already active; not buying again.")
         else:
@@ -324,6 +335,9 @@ def main():
         log(f"7d runtime bought this run: {bought or 'no'}")
         log(f"AFK earned this run: +{earned} (exit: {why})")
         log(f"runtime expires: {final.get('runtime_expires')}")
+        if why != "day-cap" and (why in ("nav-failed", "no-balance-readout", "no-credit") or earned <= 0):
+            log("::error::AFK did not show verified credit growth")
+            return 2
         return 0
     finally:
         try:
