@@ -1,0 +1,51 @@
+name: Plugged read-only diagnostic temporary
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Read-only panel and Minecraft check
+        env:
+          KEY: ${{ secrets.PLUGGED_API_KEY }}
+        run: |
+          python3 - <<'PYCODE'
+          import os, urllib.request, urllib.error, json, socket
+          base='https://panel.plugged.host/api/client/servers/75cd14b3-aaf3-4a1c-a214-dbd787e76d5a'
+          ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+          for path in ['', '/resources']:
+              req=urllib.request.Request(base+path, headers={'Authorization':'Bearer '+os.environ['KEY'].strip(), 'Accept':'application/json','User-Agent':ua})
+              try:
+                  with urllib.request.urlopen(req,timeout=15) as r:
+                      d=json.load(r); print('PANEL',path or 'detail','HTTP',r.status)
+                      if path:
+                          v=d.get('resources',{}); print('resources:', {k:v.get(k) for k in ['state','uptime','memory_bytes','cpu_absolute']})
+                      else:
+                          v=d.get('server',{}); print('server:', {k:v.get(k) for k in ['name','is_suspended','status']})
+              except urllib.error.HTTPError as e:
+                  print('PANEL',path or 'detail','HTTP',e.code,'content-type',e.headers.get('content-type'),'cf-mitigated',e.headers.get('cf-mitigated'))
+              except Exception as e: print('PANEL',path or 'detail','ERROR',type(e).__name__)
+          def vi(n):
+              b=bytearray()
+              while True:
+                  x=n&127;n>>=7;b.append(x|(128 if n else 0))
+                  if not n:return bytes(b)
+          def readvar(s):
+              out=0
+              for i in range(5):
+                  x=s.recv(1)
+                  if not x:raise EOFError('closed')
+                  out|=(x[0]&127)<<(7*i)
+                  if not x[0]&128:return out
+              raise ValueError('bad varint')
+          try:
+              host='pl2.plugged.host';port=34066;s=socket.create_connection((host,port),timeout=10);s.settimeout(10);h=host.encode();p=vi(0)+vi(769)+vi(len(h))+h+port.to_bytes(2,'big')+vi(1);s.sendall(vi(len(p))+p+b'\x01\x00');length=readvar(s);pid=readvar(s);ln=readvar(s);data=b''
+              while len(data)<ln:
+                  chunk=s.recv(ln-len(data))
+                  if not chunk:break
+                  data+=chunk
+              j=json.loads(data);print('MINECRAFT STATUS',json.dumps({k:j.get(k) for k in ['version','players','description']},ensure_ascii=False)[:1000]);s.close()
+          except Exception as e:print('MINECRAFT STATUS ERROR',type(e).__name__,str(e)[:100])
+          PYCODE
