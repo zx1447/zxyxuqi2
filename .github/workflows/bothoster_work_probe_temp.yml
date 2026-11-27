@@ -42,7 +42,7 @@ jobs:
                           data=json.loads(raw);print(name,'HTTP',r.status,'country',data.get('country_code','未知'),flush=True)
                       else:
                           print(name,'HTTP',r.status,'标题包含防护提示',b'Just a moment' in raw or b'Proxy/VPN Was Detected' in raw,flush=True)
-              except Exception as e:print(name,'失败',type(e).__name__,flush=True)
+              except Exception as e:print(name,'失败',type(e).__name__,'HTTP',getattr(e,'code','无'),flush=True)
           print('未生成奖励短链、未登录 Work.ink、未领取奖励；首页可达不代表奖励链路可用。',flush=True)
           PYCODE
       - name: 清理配置
