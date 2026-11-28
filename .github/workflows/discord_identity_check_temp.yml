@@ -19,23 +19,25 @@ jobs:
           SC_DISCORD_TOKEN: ${{ secrets.SC_DISCORD_TOKEN }}
         run: |
           python3 - <<'PYCODE'
-          import os,json,urllib.request,urllib.error,time
-          names=['AURIX_DISCORD_TOKEN', 'BLINKY_DISCORD_TOKEN', 'BOTHOSTER_DISCORD_TOKEN', 'MWS_DISCORD_TOKEN', 'NODAROO_DISCORD_TOKEN', 'OGN_DISCORD_TOKEN', 'SC_DISCORD_TOKEN']
+          import os,json,urllib.request,urllib.error,base64,time
+          names=[k for k in os.environ if k.endswith('_DISCORD_TOKEN')]
+          ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
           for name in names:
               token=os.environ.get(name,'').strip()
-              if not token:
-                  print(name,'EMPTY',flush=True);continue
               try:
-                  req=urllib.request.Request('https://discord.com/api/v10/users/@me',headers={'Authorization':token,'User-Agent':'IdentityCheck/1.0','Accept':'application/json'})
+                  first=token.split('.')[0];decoded=base64.urlsafe_b64decode(first+'='*((-len(first))%4)).decode()
+                  matching=decoded=='1428670211372089406'
+              except Exception: matching=False
+              if not matching:continue
+              print(name,'ACCOUNT_ID_MATCH',flush=True)
+              try:
+                  req=urllib.request.Request('https://discord.com/api/v10/users/@me',headers={'Authorization':token,'User-Agent':ua,'Accept':'application/json'})
                   with urllib.request.urlopen(req,timeout=15) as r:
-                      user=json.load(r)
-                      nameset=[str(user.get('username') or '').lower(),str(user.get('global_name') or '').lower()]
-                      if 'laihate' in nameset:
-                          print(name,'MATCH VALID','username',user.get('username'),'user_id',user.get('id'),flush=True)
-                      else:print(name,'VALID_NOT_LAIHATE',flush=True)
+                      user=json.load(r);print(name,'HTTP',r.status,'USERNAME_MATCH',user.get('username','').lower()=='laihate',flush=True)
               except urllib.error.HTTPError as e:
-                  print(name,'HTTP',e.code,flush=True)
-              except Exception as e:
-                  print(name,'ERROR',type(e).__name__,flush=True)
+                  try: err=json.loads(e.read().decode()).get('message','')
+                  except Exception: err=''
+                  print(name,'HTTP',e.code,'MESSAGE',err,flush=True)
+              except Exception as e:print(name,'ERROR',type(e).__name__,flush=True)
               time.sleep(1)
           PYCODE
